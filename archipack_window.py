@@ -795,7 +795,7 @@ class archipack_window(ArchipackObject, Manipulable, PropertyGroup):
             return WindowPanel(
                 False,     # closed
                 [1, 1, 0, 0],     # x index
-                [-x1, x0],
+                [-x1, x0 + self.frame_overflow - self.frame_x],
                 [y_outside, y0, y0, y_inside],
                 [outside_mat, outside_mat, inside_mat],     # material index
                 side_cap_front=3,     # cap index
@@ -806,7 +806,7 @@ class archipack_window(ArchipackObject, Manipulable, PropertyGroup):
             return WindowPanel(
                 False,     # closed
                 [0, 0, 0],     # x index
-                [x0],
+                [x0 + self.frame_overflow - self.frame_x],
                 [y_outside, y0, y_inside],
                 [outside_mat, inside_mat],     # material index
                 side_cap_front=2,     # cap index
@@ -1534,7 +1534,7 @@ class archipack_window(ArchipackObject, Manipulable, PropertyGroup):
             x0 -= min(self.frame_x - 0.001, self.out_tablet_z)
         shape_z = [0, x0]
 
-        verts = hole.vertices(self.curve_steps, Vector((0, self.altitude, 0)), center, origin, size, radius,
+        verts = hole.vertices(self.curve_steps, Vector((0, self.altitude + self.frame_x - self.frame_overflow, 0)), center, origin, size, radius,
             self.angle_y, 0, shape_z=shape_z, path_type=self.shape)
 
         faces = hole.faces(self.curve_steps, path_type=self.shape)
