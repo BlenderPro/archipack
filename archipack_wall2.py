@@ -775,9 +775,9 @@ class archipack_wall2_part(PropertyGroup):
 
         row = layout.row(align=True)
         if self.expand:
-            row.prop(self, 'expand', icon="TRIA_DOWN", icon_only=True, text="Part " + str(index + 1), emboss=False)
+            row.prop(self, 'expand', icon="TRIA_DOWN", icon_only=True, text="Wall Segment " + str(index + 1), emboss=False)
         else:
-            row.prop(self, 'expand', icon="TRIA_RIGHT", icon_only=True, text="Part " + str(index + 1), emboss=False)
+            row.prop(self, 'expand', icon="TRIA_RIGHT", icon_only=True, text="Wall Segment " + str(index + 1), emboss=False)
 
         row.prop(self, "type", text="")
 
@@ -788,20 +788,25 @@ class archipack_wall2_part(PropertyGroup):
                 row.operator("archipack.wall2_remove", text="Remove").index = index
             if self.type == 'C_WALL':
                 row = layout.row()
-                row.prop(self, "radius")
+                row.label("Radius")
+                row.prop(self, "radius",text="")
                 row = layout.row()
                 row.prop(self, "da")
             else:
                 row = layout.row()
-                row.prop(self, "length")
+                row.label("Wall Length:")
+                row.prop(self, "length",text="")
             row = layout.row()
-            row.prop(self, "a0")
+            row.label("Rotation")
+            row.prop(self, "a0",text="")
             row = layout.row()
-            row.prop(self, "splits")
+            row.label("Number of Splits:")
+            row.prop(self, "splits",text="")
             for split in range(self.n_splits):
                 row = layout.row()
-                row.prop(self, "z", text="alt", index=split)
-                row.prop(self, "t", text="pos", index=split)
+                row.label("Split " + str(split + 1))
+                row.prop(self, "z", text="Height", index=split)
+                row.prop(self, "t", text="Location", index=split)
 
 
 class archipack_wall2_child(PropertyGroup):
@@ -826,6 +831,13 @@ class archipack_wall2_child(PropertyGroup):
 
 
 class archipack_wall2(ArchipackObject, ArchipackCurveManager, Manipulable, DimensionProvider, PropertyGroup):
+    wall_tabs = EnumProperty(name="Wall Tabs",
+                       items=[('MAIN',"Main",'Show the default sizes options'),
+#                               ('OBSTACLES',"Obstacles",'Show the Obstacle Options'),
+#                               ('DIMENSIONS',"Dimensions",'Show the Dimension Options'),
+                              ('SEGMENTS',"Wall Segments",'Show the Individual Wall Segment Options')],
+                       default = 'MAIN')
+    
     parts = CollectionProperty(type=archipack_wall2_part)
     n_parts = IntProperty(
             name="Parts",
@@ -867,7 +879,7 @@ class archipack_wall2(ArchipackObject, ArchipackCurveManager, Manipulable, Dimen
             unit='LENGTH', subtype='DISTANCE',
             description='Thickness of floors',
             min=0,
-            default=0.1, precision=2, step=1,
+            default=0, precision=2, step=1,
             update=update
             )
     radius = FloatProperty(
@@ -2216,47 +2228,74 @@ class ARCHIPACK_PT_wall2(Panel):
         if prop is None:
             return
         layout = self.layout
-        row = layout.row(align=True)
-        row.operator("archipack.manipulate", icon='HAND')
-        row.operator("archipack.wall2", text="Delete", icon='ERROR').mode = 'DELETE'
-        # row = layout.row(align=True)
-        # row.prop(prop, 'realtime')
-        box = layout.box()
-        box.prop(prop, 'width')
-        box.prop(prop, 'z')
-        box.prop(prop, 'z_offset')
-        row = box.row()
-        row.prop(prop, 'flip')
-        row.prop(prop, 'x_offset')
-        box.prop(prop, 'step_angle')
-        box = layout.box()
-        box.prop_search(prop, "t_part", context.scene, "objects", text="T parent", icon='OBJECT_DATAMODE')
-        box.operator("archipack.wall2_reverse", icon='FILE_REFRESH')
-        box.operator("archipack.wall2_fit_roof")
-        box.prop(prop, "fit_roof")
-        box = layout.box()
-        box.prop(prop, "dimensions")
-        box.label(text="Create curves")
-        row = box.row(align=True)
-        row.operator("archipack.wall2_to_curve", text="Symbol").mode = 'SYMBOL'
-        row.operator("archipack.wall2_to_curve", text="Floor").mode = 'FLOORS'
-        row.operator("archipack.wall2_to_curve", text="Molding").mode = 'FLOOR_MOLDINGS'
-        row = box.row(align=True)
-        row.operator("archipack.wall2_to_curve", text="Bounds").mode = 'MERGE'
-        row.operator("archipack.wall2_to_curve", text="In").mode = 'INSIDE'
-        row.operator("archipack.wall2_to_curve", text="Out").mode = 'OUTSIDE'
-        # row.operator("archipack.wall2_fit_roof", text="Inside").inside = True
-        box = layout.box()
-        row = box.row()
-        row.prop(prop, 'n_parts')
-        row.prop(prop, "closed")
-        n_parts = prop.n_parts
-        if prop.closed:
-            n_parts += 1
-        for i, part in enumerate(prop.parts):
-            if i < n_parts:
-                box = layout.box()
-                part.draw(box, context, i)
+        
+        row = layout.row()
+        row.scale_y = 1.3
+        row.menu('WALL_MT_menu')   
+        
+        col = layout.column(align=True)
+        row = col.row(align=True)
+        row.prop(prop,'wall_tabs',expand=True)        
+        
+        if prop.wall_tabs == 'MAIN':
+            # row = layout.row(align=True)
+            # row.prop(prop, 'realtime')
+            box = col.box()
+            row = box.row()
+            row.label("Wall Height:")
+            row.prop(prop, 'z',text="")        
+            row = box.row()
+            row.label("Wall Depth:")
+            row.prop(prop, 'width',text="")
+            
+            row = box.row()
+            row.prop(prop, "closed")
+            row = box.row()
+            row.prop(prop, 'flip')
+            row.prop(prop, 'x_offset')
+    #         box.prop(prop, 'step_angle')
+    #         box = layout.box()
+    #         box.prop_search(prop, "t_part", context.scene, "objects", text="T parent", icon='OBJECT_DATAMODE')
+    #         box.operator("archipack.wall2_reverse", icon='FILE_REFRESH')
+    #         box.operator("archipack.wall2_fit_roof")
+    #         box.prop(prop, "fit_roof")
+#         if prop.wall_tabs == 'DIMENSIONS':
+#             box = col.box()
+            box.prop(prop, "dimensions",text="Add Dimensions")
+#             box.label(text="Create curves")
+#             row = box.row(align=True)
+#             row.operator("archipack.wall2_to_curve", text="Symbol").mode = 'SYMBOL'
+#             row.operator("archipack.wall2_to_curve", text="Floor").mode = 'FLOORS'
+#             row.operator("archipack.wall2_to_curve", text="Molding").mode = 'FLOOR_MOLDINGS'
+#             row = box.row(align=True)
+#             row.operator("archipack.wall2_to_curve", text="Bounds").mode = 'MERGE'
+#             row.operator("archipack.wall2_to_curve", text="In").mode = 'INSIDE'
+#             row.operator("archipack.wall2_to_curve", text="Out").mode = 'OUTSIDE'
+            # row.operator("archipack.wall2_fit_roof", text="Inside").inside = True
+#             box = layout.box()
+#             row = box.row()
+
+            #TODO: ADD ICONS
+            box = col.box()
+            box.label("Room Tools")
+            box.operator('archipack.slab_from_wall',text="Add Floor Slab").ceiling=False
+            box.operator('archipack.slab_from_wall',text="Add Ceiling").ceiling=True
+            box.operator('archipack.floor_preset_from_wall',text="Add Floor")
+            box.operator('archipack.molding_preset_from_wall',text="Add Molding")
+            box.operator('archipack.roof_from_wall',text="Add Roof")
+            
+        if prop.wall_tabs == 'SEGMENTS':
+            box = col.box()
+            row = box.row()
+            row.label("Wall Segments:")
+            row.prop(prop, 'n_parts',text="")
+            n_parts = prop.n_parts
+            if prop.closed:
+                n_parts += 1
+            for i, part in enumerate(prop.parts):
+                if i < n_parts:
+                    segment_box = col.box()
+                    part.draw(segment_box, context, i)
 
     @classmethod
     def poll(cls, context):
@@ -2997,6 +3036,14 @@ class ARCHIPACK_OT_wall2_manipulate(Operator):
             context.scene.objects.active = o
         return {'FINISHED'}
 
+class WALL_MT_menu(bpy.types.Menu):
+    bl_label = "Wall Options"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("archipack.manipulate", text="Show/Hide Wall Dimensions",icon='HAND')
+        layout.operator("archipack.wall2", text="Delete Walls", icon='X').mode = 'DELETE'
+
 
 def register():
     bpy.utils.register_class(archipack_wall2_part)
@@ -3014,7 +3061,7 @@ def register():
     bpy.utils.register_class(ARCHIPACK_OT_wall2_from_slab)
     bpy.utils.register_class(ARCHIPACK_OT_wall2_fit_roof)
     bpy.utils.register_class(ARCHIPACK_OT_wall2_to_curve)
-
+    bpy.utils.register_class(WALL_MT_menu)
 
 def unregister():
     bpy.utils.unregister_class(archipack_wall2_part)
@@ -3032,3 +3079,4 @@ def unregister():
     bpy.utils.unregister_class(ARCHIPACK_OT_wall2_from_slab)
     bpy.utils.unregister_class(ARCHIPACK_OT_wall2_fit_roof)
     bpy.utils.unregister_class(ARCHIPACK_OT_wall2_to_curve)
+    bpy.utils.unregister_class(WALL_MT_menu)
