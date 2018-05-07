@@ -1873,9 +1873,9 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
         row = box.row(align=True)
 
         if self.expand:
-            row.prop(self, "expand", icon="TRIA_DOWN", icon_only=True, text="Cab " + str(num + 1), emboss=False)
+            row.prop(self, "expand", icon="TRIA_DOWN", icon_only=True, text="Cabinet " + str(num + 1), emboss=False)
         else:
-            row.prop(self, "expand", icon="TRIA_RIGHT", icon_only=True, text="Cab " + str(num + 1), emboss=False)
+            row.prop(self, "expand", icon="TRIA_RIGHT", icon_only=True, text="Cabinet " + str(num + 1), emboss=False)
         row.prop(self, 'cab_location', text="")
         row.prop(self, 'type', text="")
         row.operator("archipack.kitchen_insert", icon="ZOOMIN", text="").index = num
@@ -1884,11 +1884,13 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
         if self.expand:
             cab_type = self.cab_type
             row = box.row(align=True)
-            row.prop(self, 'x')
-            row.prop(self, 'dy')
-            row.prop(self, 'dz')
+            row.label("Size:")
+            row.prop(self, 'x',text="Width")
+            row.prop(self, 'dy',text="Height")
+            row.prop(self, 'dz',text="Depth")
 
             row = box.row(align=True)
+            row.label("Location:")
             row.prop(self, 'px')
             row.prop(self, 'py')
             row.prop(self, 'pz')
@@ -1906,7 +1908,7 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
             if self.location == 1:
                 if prop.counter:
                     row = box.row(align=True)
-                    row.prop(self, 'counter', text="")
+                    row.prop(self, 'counter', text="Cabinet Top")
                     if int(self.counter) > 1:
                         row = box.row(align=True)
                         row.prop(self, 'counter_x')
@@ -1915,27 +1917,46 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
             if self.location != 2 and cab_type != 8:
                 if prop.baseboard:
                     row = box.row(align=True)
-                    row.prop(self, 'baseboard', text="Baseboard")
+                    row.prop(self, 'baseboard', text="Add Baseboard")
                     if self.baseboard:
-                        row.prop(self, 'base_front', text="")
-                        row.prop(self, 'base_sink', text="")
-                        row.prop(self, 'base_left', text="")
-                        row.prop(self, 'base_right', text="")
+                        row = box.row(align=True)
+                        row.label("Finish Ends:")                        
+                        row.prop(self, 'base_left', text="Left")
+                        row.prop(self, 'base_right', text="Right")                        
+                        row = box.row(align=True)
+                        row.label("Base Setback:")
+                        row.prop(self, 'base_front', text="Front")
+                        row.prop(self, 'base_sink', text="Sides")
+
 
             if cab_type != 8:
                 row = box.row(align=True)
-                row.prop(self, 'panel_left_width')
-                row.prop(self, 'panel_left', text="")
-                row.prop(self, 'panel_right_width')
-                row.prop(self, 'panel_right', text="")
-
+                row.label("Applied Ends")
+                row.prop(self, 'panel_left', text="Left")
+                row.prop(self, 'panel_right', text="Right")
+                if self.panel_left or self.panel_right:
+                    row.label("Thickness")
+                    if self.panel_left:
+                        row.prop(self, 'panel_left_width')
+                    if self.panel_right:
+                        row.prop(self, 'panel_right_width')
+                
                 row = box.row()
-                row.prop(self, 'n_modules')
+                row.label("Number of Doors")
+                row.prop(self, 'n_modules',text="")
                 for i, module in enumerate(reversed(self.modules)):
                     module.draw(box, self.n_modules - i, int(prop.z_mode))
 
 
 class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, PropertyGroup):
+
+    kitchen_tabs = EnumProperty(name="Defaults Tabs",
+                       items=[('MAIN',"Main",'Show the main options'),
+                              ('DOORS',"Doors",'Show the default door options'),
+                              ('HARDWARE',"Hardware",'Show the hardware options'),
+                              ('MOLDING',"Molding",'Show the molding options'),
+                              ('CABINETS',"Cabinets",'Show the cabinet options')],
+                       default = 'MAIN')
 
     door_style = EnumProperty(
             name='Doors',
@@ -2005,7 +2026,7 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
                 ('1', 'Height Multiplier', 'Height are multiples of base height, default 6/6/16 modules'),
                 ('2', 'Height Absolute', 'Height are absolute values'),
                 ),
-            default='1',
+            default='2',
             update=update
             )
     module_size = FloatProperty(
@@ -3867,7 +3888,7 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
         bpy.ops.uv.cube_project()
         bpy.ops.mesh.select_all(action='DESELECT')
         bpy.ops.object.mode_set(mode='OBJECT')
-        #
+
         self.update_modules(context, o)
 
         if manipulable_refresh:
@@ -3875,8 +3896,113 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
         
         self.update_dimensions(context, o)
         
-        # restore context
         self.restore_context(context)
+
+    def draw_ui(self,layout):
+
+        row = layout.row()
+        row.scale_y = 1.3
+        row.menu('KITCHEN_MT_menu')   
+        
+        col = layout.column(align=True)
+
+        row = col.row(align=True)
+        row.prop(self,'kitchen_tabs',expand=True)
+        box = col.box()
+        if self.kitchen_tabs == 'MAIN':
+            box.label("Cabinet Sizes")
+            box.prop(self, 'z_mode',text="Z MODE")
+            
+            row = box.row(align=True)
+            row.label("Base Cabinets:")
+            row.prop(self, 'z_default',text="Height")
+            row.prop(self, 'y',text="Depth")
+            
+            row = box.row(align=True)
+            row.label("Upper Cabinets:")
+            row.prop(self, 'z_wall',text="Height")
+            row.prop(self, 'yw',text="Depth")
+            
+            row = box.row(align=True)
+            row.label("Tall Cabinets:")
+            row.prop(self, 'z_full',text="Height")            
+
+            row = box.row(align=True)
+            row.label("Part Thickness:")
+            row.prop(self, 'thickness',text="")
+
+            box = col.box()
+            box.label("Counter Top")
+            box.prop(self, "counter",text="Add Counter Top")
+            if self.counter:
+                row = box.row()
+                row.label("Counter Top Thickness:")
+                row.prop(self, "counter_z",text="")
+                row = box.row()
+                row.label("Counter Top Overhang:")                
+                row.prop(self, "counter_y",text="")
+                row = box.row()
+                row.label("Counter Top Bevel:")
+                row.prop(self, "counter_chanfer",text="")
+        
+        if self.kitchen_tabs == 'DOORS':
+            box.prop(self, 'door_style')
+            row = box.row()
+            row.prop(self, 'door_y')
+            row.prop(self, 'door_gap')
+
+            door_style = int(self.door_style)
+            if door_style > 10:
+                row = box.row()
+                row.prop(self, 'door_chanfer')
+
+            if door_style in {2, 12, 13}:
+                row.prop(self, 'door_x')
+
+            if door_style == 13:
+                box.prop(self, 'door_board_chanfer')
+                
+        if self.kitchen_tabs == 'HARDWARE':
+            box.prop(self, 'handle', text="Handle")
+            if self.handle != "0":
+                handle_style = int(self.handle)
+                handle_fit = handle_style < 150
+                if handle_fit:
+                    box.prop(self, 'handle_fit')
+                row = box.row()
+                if handle_style not in {180}:
+                    row.prop(self, 'handle_y')
+                if handle_style > 149 and handle_style < 160:
+                    # Handles
+                    row.prop(self, 'handle_r')
+                else:
+                    # Bars
+                    if handle_style not in {180, 190}:
+                        row.prop(self, 'handle_x')
+                    row.prop(self, 'handle_z')
+
+                if handle_style not in {180, 190}:
+                    row = box.row()
+                    row.prop(self, 'handle_dx')
+                    if handle_fit and self.handle_fit:
+                        row.prop(self, 'handle_space')
+                    else:
+                        row.prop(self, 'handle_dz')
+        
+        if self.kitchen_tabs == 'MOLDING':
+            box.prop(self, 'baseboard')
+            if self.baseboard:
+                row = box.row()
+                row.prop(self, 'base_height')
+                row.prop(self, 'base_sink')
+        
+        if self.kitchen_tabs == 'CABINETS':
+            row = box.row()
+            row.label("Number of Cabinets:")
+            row.prop(self, 'cabinet_num',text="")
+            for i, cab in enumerate(self.cabinets):
+                cabinet_box = col.box()
+                cab.draw(cabinet_box, i, self)
 
 
 class ARCHIPACK_PT_kitchen(Panel):
@@ -3895,124 +4021,11 @@ class ARCHIPACK_PT_kitchen(Panel):
     def draw(self, context):
         o = context.active_object
         prop = archipack_kitchen.datablock(o)
-
-        if prop is None:
-            return
-
         layout = self.layout
-        layout.operator('archipack.manipulate', icon='HAND')
-        """
-        row = layout.row(align=True)
-        row.operator('archipack.kitchen', text="Refresh", icon='FILE_REFRESH').mode = 'REFRESH'
-        if o.data.users > 1:
-            row.operator('archipack.kitchen', text="Make unique", icon='UNLINKED').mode = 'UNIQUE'
-        """
-        layout.operator('archipack.kitchen', text="Delete", icon='ERROR').mode = 'DELETE'
-        box = layout.box()
-        row = box.row(align=True)
-        row.operator("archipack.kitchen_preset_menu", text=bpy.types.ARCHIPACK_OT_kitchen_preset_menu.bl_label)
-        row.operator("archipack.kitchen_preset", text="", icon='ZOOMIN')
-        row.operator("archipack.kitchen_preset", text="", icon='ZOOMOUT').remove_active = True
-
-        box = layout.box()
-        if prop.expand:
-            box.prop(prop, "expand", icon="TRIA_DOWN", icon_only=True, text="Kitchen", emboss=False)
-
-            row = box.row()
-            row.prop(prop, 'z_mode', text="")
-            if prop.z_mode == '1':
-                row.prop(prop, 'module_size')
-                row = box.row()
-                row.prop(prop, 'modules_default')
-                row.prop(prop, 'y')
-                row = box.row()
-                row.prop(prop, 'modules_wall')
-                row.prop(prop, 'yw')
-                box.prop(prop, 'modules_full')
-            else:
-                row = box.row()
-                row.prop(prop, 'z_default')
-                row.prop(prop, 'y')
-                row = box.row()
-                row.prop(prop, 'z_wall')
-                row.prop(prop, 'yw')
-                box.prop(prop, 'z_full')
-
-            row = box.row()
-            row.prop(prop, 'thickness')
-
-            box = layout.box()
-            box.prop(prop, 'door_style')
-            row = box.row()
-            row.prop(prop, 'door_y')
-            row.prop(prop, 'door_gap')
-
-            door_style = int(prop.door_style)
-            if door_style > 10:
-                row = box.row()
-                row.prop(prop, 'door_chanfer')
-
-            if door_style in {2, 12, 13}:
-                row.prop(prop, 'door_x')
-
-            if door_style == 13:
-                box.prop(prop, 'door_board_chanfer')
-
-            box = layout.box()
-            box.prop(prop, 'handle', text="Handle")
-            if prop.handle != "0":
-                handle_style = int(prop.handle)
-                handle_fit = handle_style < 150
-                if handle_fit:
-                    box.prop(prop, 'handle_fit')
-                row = box.row()
-                if handle_style not in {180}:
-                    row.prop(prop, 'handle_y')
-                if handle_style > 149 and handle_style < 160:
-                    # Handles
-                    row.prop(prop, 'handle_r')
-                else:
-                    # Bars
-                    if handle_style not in {180, 190}:
-                        row.prop(prop, 'handle_x')
-                    row.prop(prop, 'handle_z')
-
-                if handle_style not in {180, 190}:
-                    row = box.row()
-                    row.prop(prop, 'handle_dx')
-                    if handle_fit and prop.handle_fit:
-                        row.prop(prop, 'handle_space')
-                    else:
-                        row.prop(prop, 'handle_dz')
-
-            box = layout.box()
-            box.prop(prop, "counter")
-            if prop.counter:
-                row = box.row()
-                row.prop(prop, "counter_z")
-                row.prop(prop, "counter_y")
-                row.prop(prop, "counter_chanfer")
-            box = layout.box()
-            box.prop(prop, 'baseboard')
-            if prop.baseboard:
-                row = box.row()
-                row.prop(prop, 'base_height')
-                row.prop(prop, 'base_sink')
-
-            box = layout.box()
-            row = box.row()
-
-        else:
-            row = box.row()
-            row.prop(prop, "expand", icon="TRIA_RIGHT", icon_only=True, text="Kitchen", emboss=False)
-
-        # Cabinet number
-        row.prop(prop, 'cabinet_num')
-        # Add menu for cabinets
-        for i, cab in enumerate(prop.cabinets):
-            box = layout.box()
-            cab.draw(box, i, prop)
-
+        
+        if prop:
+            prop.draw_ui(layout)
+            
 
 class ARCHIPACK_PT_kitchen_module(Panel):
     bl_idname = "ARCHIPACK_PT_kitchen_module"
@@ -4180,6 +4193,18 @@ class ARCHIPACK_OT_kitchen_preset(ArchipackPreset, Operator):
         return ['manipulators']
 
 
+class KITCHEN_MT_menu(bpy.types.Menu):
+    bl_label = "Kitchen Options"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator('archipack.manipulate', text="Show/Hide Dimensions", icon='HAND')
+        layout.separator()
+        layout.operator("archipack.kitchen_preset_menu", text="Change Kitchen Preset",icon='IMGDISPLAY')
+        layout.operator("archipack.kitchen_preset", text="Save Kitchen to Library", icon='FILE_TICK')    
+        layout.separator()
+        layout.operator('archipack.kitchen', text="Delete Kitchen", icon='X').mode = 'DELETE'       
+
 def register():
     bpy.utils.register_class(archipack_kitchen_module)
     Mesh.archipack_kitchen_module = CollectionProperty(type=archipack_kitchen_module)
@@ -4193,7 +4218,7 @@ def register():
     bpy.utils.register_class(ARCHIPACK_OT_kitchen_remove)
     bpy.utils.register_class(ARCHIPACK_OT_kitchen_insert)
     bpy.utils.register_class(ARCHIPACK_OT_kitchen_preset)
-
+    bpy.utils.register_class(KITCHEN_MT_menu)
 
 def unregister():
     bpy.utils.unregister_class(archipack_kitchen_cabinet)
@@ -4208,3 +4233,4 @@ def unregister():
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_remove)
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_insert)
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_preset)
+    bpy.utils.unregister_class(KITCHEN_MT_menu)
