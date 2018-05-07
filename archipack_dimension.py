@@ -733,7 +733,7 @@ class archipack_dimension_auto(ArchipackObject, Manipulable, PropertyGroup):
     sum_bar = BoolProperty(
             name="Sum",
             description="Generate sum line",
-            default=True,
+            default=False,
             update=update
             )
     distance_sum = FloatProperty(
@@ -1332,23 +1332,35 @@ class ARCHIPACK_PT_dimension_auto(Panel):
                       icon='ZOOMOUT').remove_active = True
 
         box = layout.box()
-        box.prop(props, 'type')
-        box.prop(props, 'distance')
-        box.prop(props, 'flip_side')
-        box.prop(props, 'sum_bar')
+#         box.prop(props, 'type')
+        box.prop(props, 'symbol_type')
+        row = box.row()
+        row.label("Leader Length:")
+        row.prop(props, 'distance',text="")
+        row = box.row()
+        row.prop(props, 'flip_side')
+        row.prop(props, 'sum_bar')
         if props.sum_bar:
             box.prop(props, 'distance_sum')
-        box.prop(props, 'offset')
-        box.prop(props, 'relative_offset')
-        box = layout.box()
-        box.prop(props, 'symbol_type')
-        box.prop(props, 'symbol_size')
+        row = box.row()
+        row.label("Symbol Size:")
+        row.prop(props, 'symbol_size',text="")
         if "ARROW" in props.symbol_type:
-            box.prop(props, 'symbol_thickness')
-        box.prop(props, 'text_location')
-        box.prop(props, 'text_size')
-        box.prop(props, 'text_offset')
-        box.prop(props, 'text_angle')
+            row.prop(props, 'symbol_thickness',text="")            
+        row = box.row()
+        row.label("Dimension Offset:")            
+        row.prop(props, 'offset',text="")
+#         box.prop(props, 'relative_offset')
+#         box = layout.box()
+        row = box.row(align=True)
+        row.label("Text:")
+        row.prop(props, 'text_size',text="Size")
+        row.prop(props, 'text_offset',text="Offset")
+        row.prop(props, 'text_angle',text="Angle")            
+        row = box.row()
+        row.label("Text Location:")
+        row.prop(props, 'text_location',text="")
+
 
 
 """
