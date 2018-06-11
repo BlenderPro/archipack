@@ -35,13 +35,19 @@ from bpy.props import (
 from .bmesh_utils import BmeshEdit as bmed
 from .panel import Panel as Lofter
 from mathutils import Vector, Matrix
-from math import sin, cos, pi, floor, acos
+from math import sin, cos, pi, floor, acos, atan2, degrees
 from .archipack_manipulator import Manipulable, archipack_manipulator
 from .archipack_2d import Line, Arc
+from .archipack_gl import GlText
 from .archipack_preset import ArchipackPreset, PresetMenuOperator
-from .archipack_object import ArchipackCreateTool, ArchipackObject
+from .archipack_object import (
+    ArchipackCreateTool, 
+    ArchipackObject,
+    ArchipackObjectsManager
+    )
 from .archipack_polylines import Io
 from .archipack_dimension import DimensionProvider
+from .archipack_throttle import throttle
 
 
 class Stair():
@@ -265,12 +271,15 @@ class Stair():
         t2, part, dz, shape = self.get_part(tr, "RIGHT")
         p1 = part.lerp(t2)
         v = (p1 - p0).normalized()
-        return Matrix([
+        tM = Matrix([
             [-v.y, v.x, 0, p0.x],
             [v.x, v.y, 0, p0.y],
             [0, 0, 1, 0],
             [0, 0, 0, 1]
-        ]).inverted()
+            ])
+        if v.x == 0 and v.y == 0:
+            return Matrix.Translation(p0.to_3d()).inverted()
+        return tM.inverted()
 
     def _make_nose(self, i, s, verts, faces, matids, uvs, nose_y):
         f = len(verts)
@@ -285,7 +294,7 @@ class Stair():
         # into uv space for horizontal parts of this step
         # so uv = (rM * vertex).to_2d()
         rM = self.get_proj_matrix(self, t, nose_y)
-
+        
         if self.z_mode == 'LINEAR':
             return rM
 
@@ -309,20 +318,20 @@ class Stair():
              self.idmat_top,
              self.idmat_step_side])
 
-        faces += [(f + j, f + j + 1, f + j + offset + 1, f + j + offset) for j in range(start, end)]
+        faces.extend([(f + j, f + j + 1, f + j + offset + 1, f + j + offset) for j in range(start, end)])
 
         u = nose_y
         v = (p1 - p0).length
         w = verts[f + 2][2] - verts[f + 3][2]
         s = int((end - start) / 2)
 
-        uvs += [[(u, verts[f + j][2]), (u, verts[f + j + 1][2]),
-            (0, verts[f + j + 1][2]), (0, verts[f + j][2])] for j in range(start, start + s)]
+        uvs.extend([[(u, verts[f + j][2]), (u, verts[f + j + 1][2]),
+            (0, verts[f + j + 1][2]), (0, verts[f + j][2])] for j in range(start, start + s)])
 
         uvs.append([(0, 0), (0, v), (u, v), (u, 0)])
 
-        uvs += [[(u, verts[f + j][2]), (u, verts[f + j + 1][2]),
-            (0, verts[f + j + 1][2]), (0, verts[f + j][2])] for j in range(start + s + 1, end)]
+        uvs.extend([[(u, verts[f + j][2]), (u, verts[f + j + 1][2]),
+            (0, verts[f + j + 1][2]), (0, verts[f + j][2])] for j in range(start + s + 1, end)])
 
         if 'STRAIGHT' in self.nose_type or 'OPEN' in self.steps_type:
             # face bottom
@@ -413,7 +422,7 @@ class Stair():
 
         self.project_uv(rM, uvs, verts, [f + end, f + start, f + offset + start, f + offset + end])
 
-        faces += [(f + j, f + j + 1, f + j + offset + 1, f + j + offset) for j in range(start, end)]
+        faces.extend([(f + j, f + j + 1, f + j + offset + 1, f + j + offset) for j in range(start, end)])
         faces.append((f + end, f + start, f + offset + start, f + offset + end))
 
 
@@ -451,7 +460,11 @@ class StraightStair(Stair, Line):
                 faces.append((f + 13, f + 14, f + 15, f + 16))
                 matids.append(self.idmat_step_front)
                 uvs.append([(0, 0), (0, 1), (1, 1), (1, 0)])
-
+    
+    @property
+    def copy(self):
+        return Line(self.p.copy(), self.v.copy())
+        
     def get_length(self, side):
         return self.length
 
@@ -499,7 +512,11 @@ class CurvedStair(Stair, Arc):
         # left arc, tangeant at start and end
         self.l_arc, self.l_t0, self.l_t1, self.l_tc = self.set_offset(-left_offset, left_shape)
         self.r_arc, self.r_t0, self.r_t1, self.r_tc = self.set_offset(right_offset, right_shape)
-
+    
+    @property
+    def copy(self):
+        return Arc(self.c.copy(), self.r, self.a0, self.da)
+       
     def set_offset(self, offset, shape):
         arc = self.offset(offset)
         t0 = arc.tangeant(0, 1)
@@ -794,13 +811,14 @@ class StraightLanding(StraightStair):
 
         p = self.r_line.lerp(t1)
         self.p3d_right(verts, p, j, t1, self.next_type != 'LANDING')
+        
+        if self.z_mode != '2D':
+            self.make_faces(f, rM, verts, faces, matids, uvs)
 
-        self.make_faces(f, rM, verts, faces, matids, uvs)
-
-        if "OPEN" in self.steps_type and self.next_type != 'LANDING':
-            faces.append((f + 13, f + 14, f + 15, f + 16))
-            matids.append(self.idmat_step_front)
-            uvs.append([(0, 0), (0, 1), (1, 1), (1, 0)])
+            if "OPEN" in self.steps_type and self.next_type != 'LANDING':
+                faces.append((f + 13, f + 14, f + 15, f + 16))
+                matids.append(self.idmat_step_front)
+                uvs.append([(0, 0), (0, 1), (1, 1), (1, 0)])
 
     def straight_landing(self, length):
         return Stair.straight_landing(self, length, last_type='LANDING')
@@ -885,12 +903,14 @@ class CurvedLanding(CurvedStair):
             f = self._make_edge(self.t_step, i, 0, f, rM, verts, faces, matids, uvs)
 
         self._make_step(self.t_step, i + 1, 0, verts, i == self.n_step - 1 and 'LANDING' not in self.next_type)
-        self.make_faces(f, rM, verts, faces, matids, uvs)
+        
+        if self.z_mode != '2D':
+            self.make_faces(f, rM, verts, faces, matids, uvs)
 
-        if "OPEN" in self.steps_type and 'LANDING' not in self.next_type:
-            faces.append((f + 13, f + 14, f + 15, f + 16))
-            matids.append(self.idmat_step_front)
-            uvs.append([(0, 0), (0, 1), (1, 1), (1, 0)])
+            if "OPEN" in self.steps_type and 'LANDING' not in self.next_type:
+                faces.append((f + 13, f + 14, f + 15, f + 16))
+                matids.append(self.idmat_step_front)
+                uvs.append([(0, 0), (0, 1), (1, 1), (1, 0)])
 
     def straight_landing(self, length):
         return Stair.straight_landing(self, length, last_type='LANDING')
@@ -995,7 +1015,18 @@ class StairGenerator():
         for stair in self.stairs:
             stair.set_height(step_height, z)
             z = stair.top
-
+    
+    @property
+    def steps_space(self):
+        """
+         Length of stair space at axis
+        """
+        space = 0
+        for s, stair in enumerate(self.stairs):
+            if 'Landing' not in type(stair).__name__:
+                space += stair.length
+        return space
+        
     def make_stair(self, height, step_depth, verts, faces, matids, uvs, nose_y=0):
         n_steps = self.n_steps(step_depth)
         self.set_height(height / n_steps)
@@ -1025,7 +1056,7 @@ class StairGenerator():
                     manipulator.prop1_name = 'length'
                 
             stair.measure_point(self.d, part.uid)
-                
+            
             for i in range(stair.n_step):
                 stair.make_step(i, verts, faces, matids, uvs, nose_y=nose_y)
                 if s < len(self.stairs) - 1 and self.steps_type != 'OPEN' and \
@@ -1739,16 +1770,31 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
     n_parts = IntProperty(
             name="Parts",
             min=1,
-            max=32,
+            max=512,
             default=1, update=update_manipulators
             )
+    step_height = StringProperty(
+            default=""
+            )
+    step_pitch = StringProperty(
+            default=""
+            )
+    step_count = StringProperty(
+            default=""
+            )
+    step_going = StringProperty(
+            default=""
+            )
+    
     step_depth = FloatProperty(
+            description="Desired going (max)",
             name="Going",
             min=0.2,
             default=0.25,
             unit='LENGTH', subtype='DISTANCE',
             update=update
             )
+    
     width = FloatProperty(
             name="Width",
             min=0.01,
@@ -2386,7 +2432,11 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
 
         if o is None:
             return
-
+        
+        # throttle fence 
+        if len(self.parts) > 10: 
+            throttle.add(context, o, self, 0.1)
+        
         # clean up manipulators before any data model change
         if manipulable_refresh:
             self.manipulable_disable(context)
@@ -2460,120 +2510,147 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
         # Stair basis
         g.set_matids(id_materials)
         g.make_stair(self.height, self.step_depth, verts, faces, matids, uvs, nose_y=self.nose_y)
+        n_steps = g.n_steps(self.step_depth)
+        going = g.steps_space / n_steps
+        height = self.height / n_steps
+        h_label = GlText(
+            label="Rise: ",
+            value=height,
+            precision=1,
+            unit_mode='AUTO',
+            unit_type='SIZE',
+            dimension=1
+            )
+        h_label._text = h_label.add_units(context)
+        g_label = GlText(
+            label="Going: ",
+            value=going,
+            precision=1,
+            unit_mode='AUTO',
+            unit_type='SIZE',
+            dimension=1
+            )
+        g_label._text = g_label.add_units(context)
+        self.step_going = g_label.text
+        self.step_height = h_label.text
+        self.step_count = "Steps: {}".format(n_steps)
+        self.step_pitch = "Pitch: {}°".format(round(degrees(atan2(height, going)), 1))
+        
+        if not throttle.is_active(o.name):
+        
+            # Ladder
+            offset_x = 0.5 * self.width - self.post_offset_x
+            post_spacing = self.post_spacing
+            if self.post_corners:
+                post_spacing = 10000
 
-        # Ladder
-        offset_x = 0.5 * self.width - self.post_offset_x
-        post_spacing = self.post_spacing
-        if self.post_corners:
-            post_spacing = 10000
+            if self.user_defined_post_enable:
+                # user defined posts
+                user_def_post = context.scene.objects.get(self.user_defined_post)
+                if user_def_post is not None and user_def_post.type == 'MESH':
+                    g.setup_user_defined_post(user_def_post, self.post_x, self.post_y, self.post_z)
 
-        if self.user_defined_post_enable:
-            # user defined posts
-            user_def_post = context.scene.objects.get(self.user_defined_post)
-            if user_def_post is not None and user_def_post.type == 'MESH':
-                g.setup_user_defined_post(user_def_post, self.post_x, self.post_y, self.post_z)
+            if self.left_post:
+                g.make_post(self.height, self.step_depth, 0.5 * self.post_x, 0.5 * self.post_y,
+                        self.post_z, self.post_alt, 'LEFT', post_spacing, self.post_corners,
+                        self.x_offset, offset_x, int(self.idmat_post), verts, faces, matids, uvs)
 
-        if self.left_post:
-            g.make_post(self.height, self.step_depth, 0.5 * self.post_x, 0.5 * self.post_y,
-                    self.post_z, self.post_alt, 'LEFT', post_spacing, self.post_corners,
-                    self.x_offset, offset_x, int(self.idmat_post), verts, faces, matids, uvs)
+            if self.right_post:
+                g.make_post(self.height, self.step_depth, 0.5 * self.post_x, 0.5 * self.post_y,
+                        self.post_z, self.post_alt, 'RIGHT', post_spacing, self.post_corners,
+                        self.x_offset, offset_x, int(self.idmat_post), verts, faces, matids, uvs)
 
-        if self.right_post:
-            g.make_post(self.height, self.step_depth, 0.5 * self.post_x, 0.5 * self.post_y,
-                    self.post_z, self.post_alt, 'RIGHT', post_spacing, self.post_corners,
-                    self.x_offset, offset_x, int(self.idmat_post), verts, faces, matids, uvs)
+            # reset user def posts
+            g.user_defined_post = None
 
-        # reset user def posts
-        g.user_defined_post = None
+            # user defined subs
+            if self.user_defined_subs_enable:
+                user_def_subs = context.scene.objects.get(self.user_defined_subs)
+                if user_def_subs is not None and user_def_subs.type == 'MESH':
+                    g.setup_user_defined_post(user_def_subs, self.subs_x, self.subs_y, self.subs_z)
 
-        # user defined subs
-        if self.user_defined_subs_enable:
-            user_def_subs = context.scene.objects.get(self.user_defined_subs)
-            if user_def_subs is not None and user_def_subs.type == 'MESH':
-                g.setup_user_defined_post(user_def_subs, self.subs_x, self.subs_y, self.subs_z)
+            if self.left_subs:
+                g.make_subs(self.height, self.step_depth, 0.5 * self.subs_x, 0.5 * self.subs_y,
+                        self.subs_z, 0.5 * self.post_y, self.subs_alt, self.subs_bottom, 'LEFT',
+                        self.handrail_slice_left, post_spacing, self.subs_spacing, self.post_corners,
+                        self.x_offset, offset_x, -self.subs_offset_x, int(self.idmat_subs), verts, faces, matids, uvs)
 
-        if self.left_subs:
-            g.make_subs(self.height, self.step_depth, 0.5 * self.subs_x, 0.5 * self.subs_y,
-                    self.subs_z, 0.5 * self.post_y, self.subs_alt, self.subs_bottom, 'LEFT',
-                    self.handrail_slice_left, post_spacing, self.subs_spacing, self.post_corners,
-                    self.x_offset, offset_x, -self.subs_offset_x, int(self.idmat_subs), verts, faces, matids, uvs)
+            if self.right_subs:
+                g.make_subs(self.height, self.step_depth, 0.5 * self.subs_x, 0.5 * self.subs_y,
+                        self.subs_z, 0.5 * self.post_y, self.subs_alt, self.subs_bottom, 'RIGHT',
+                        self.handrail_slice_right, post_spacing, self.subs_spacing, self.post_corners,
+                        self.x_offset, offset_x, self.subs_offset_x, int(self.idmat_subs), verts, faces, matids, uvs)
 
-        if self.right_subs:
-            g.make_subs(self.height, self.step_depth, 0.5 * self.subs_x, 0.5 * self.subs_y,
-                    self.subs_z, 0.5 * self.post_y, self.subs_alt, self.subs_bottom, 'RIGHT',
-                    self.handrail_slice_right, post_spacing, self.subs_spacing, self.post_corners,
-                    self.x_offset, offset_x, self.subs_offset_x, int(self.idmat_subs), verts, faces, matids, uvs)
+            g.user_defined_post = None
 
-        g.user_defined_post = None
+            if self.left_panel:
+                g.make_panels(self.height, self.step_depth, 0.5 * self.panel_x, self.panel_z, 0.5 * self.post_y,
+                        self.panel_alt, 'LEFT', post_spacing, self.panel_dist, self.post_corners,
+                        self.x_offset, offset_x, -self.panel_offset_x, int(self.idmat_panel), verts, faces, matids, uvs)
 
-        if self.left_panel:
-            g.make_panels(self.height, self.step_depth, 0.5 * self.panel_x, self.panel_z, 0.5 * self.post_y,
-                    self.panel_alt, 'LEFT', post_spacing, self.panel_dist, self.post_corners,
-                    self.x_offset, offset_x, -self.panel_offset_x, int(self.idmat_panel), verts, faces, matids, uvs)
+            if self.right_panel:
+                g.make_panels(self.height, self.step_depth, 0.5 * self.panel_x, self.panel_z, 0.5 * self.post_y,
+                        self.panel_alt, 'RIGHT', post_spacing, self.panel_dist, self.post_corners,
+                        self.x_offset, offset_x, self.panel_offset_x, int(self.idmat_panel), verts, faces, matids, uvs)
 
-        if self.right_panel:
-            g.make_panels(self.height, self.step_depth, 0.5 * self.panel_x, self.panel_z, 0.5 * self.post_y,
-                    self.panel_alt, 'RIGHT', post_spacing, self.panel_dist, self.post_corners,
-                    self.x_offset, offset_x, self.panel_offset_x, int(self.idmat_panel), verts, faces, matids, uvs)
+            if self.right_rail:
+                for i in range(self.rail_n):
+                    id_materials = [int(self.rail_mat[i].index) for j in range(6)]
+                    g.set_matids(id_materials)
+                    g.make_part(self.height, self.step_depth, self.rail_x[i], self.rail_z[i],
+                            self.x_offset, offset_x + self.rail_offset[i],
+                            self.rail_alt[i], 'LINEAR', 'CLOSED', verts, faces, matids, uvs)
 
-        if self.right_rail:
-            for i in range(self.rail_n):
-                id_materials = [int(self.rail_mat[i].index) for j in range(6)]
-                g.set_matids(id_materials)
-                g.make_part(self.height, self.step_depth, self.rail_x[i], self.rail_z[i],
-                        self.x_offset, offset_x + self.rail_offset[i],
-                        self.rail_alt[i], 'LINEAR', 'CLOSED', verts, faces, matids, uvs)
+            if self.left_rail:
+                for i in range(self.rail_n):
+                    id_materials = [int(self.rail_mat[i].index) for j in range(6)]
+                    g.set_matids(id_materials)
+                    g.make_part(self.height, self.step_depth, self.rail_x[i], self.rail_z[i],
+                            self.x_offset, -offset_x - self.rail_offset[i],
+                            self.rail_alt[i], 'LINEAR', 'CLOSED', verts, faces, matids, uvs)
 
-        if self.left_rail:
-            for i in range(self.rail_n):
-                id_materials = [int(self.rail_mat[i].index) for j in range(6)]
-                g.set_matids(id_materials)
-                g.make_part(self.height, self.step_depth, self.rail_x[i], self.rail_z[i],
-                        self.x_offset, -offset_x - self.rail_offset[i],
-                        self.rail_alt[i], 'LINEAR', 'CLOSED', verts, faces, matids, uvs)
+            if self.handrail_profil == 'COMPLEX':
+                sx = self.handrail_x
+                sy = self.handrail_y
+                handrail = [Vector((sx * x, sy * y)) for x, y in [
+                (-0.28, 1.83), (-0.355, 1.77), (-0.415, 1.695), (-0.46, 1.605), (-0.49, 1.51), (-0.5, 1.415),
+                (-0.49, 1.315), (-0.46, 1.225), (-0.415, 1.135), (-0.355, 1.06), (-0.28, 1.0), (-0.255, 0.925),
+                (-0.33, 0.855), (-0.5, 0.855), (-0.5, 0.0), (0.5, 0.0), (0.5, 0.855), (0.33, 0.855), (0.255, 0.925),
+                (0.28, 1.0), (0.355, 1.06), (0.415, 1.135), (0.46, 1.225), (0.49, 1.315), (0.5, 1.415),
+                (0.49, 1.51), (0.46, 1.605), (0.415, 1.695), (0.355, 1.77), (0.28, 1.83), (0.19, 1.875),
+                (0.1, 1.905), (0.0, 1.915), (-0.095, 1.905), (-0.19, 1.875)]]
 
-        if self.handrail_profil == 'COMPLEX':
-            sx = self.handrail_x
-            sy = self.handrail_y
-            handrail = [Vector((sx * x, sy * y)) for x, y in [
-            (-0.28, 1.83), (-0.355, 1.77), (-0.415, 1.695), (-0.46, 1.605), (-0.49, 1.51), (-0.5, 1.415),
-            (-0.49, 1.315), (-0.46, 1.225), (-0.415, 1.135), (-0.355, 1.06), (-0.28, 1.0), (-0.255, 0.925),
-            (-0.33, 0.855), (-0.5, 0.855), (-0.5, 0.0), (0.5, 0.0), (0.5, 0.855), (0.33, 0.855), (0.255, 0.925),
-            (0.28, 1.0), (0.355, 1.06), (0.415, 1.135), (0.46, 1.225), (0.49, 1.315), (0.5, 1.415),
-            (0.49, 1.51), (0.46, 1.605), (0.415, 1.695), (0.355, 1.77), (0.28, 1.83), (0.19, 1.875),
-            (0.1, 1.905), (0.0, 1.915), (-0.095, 1.905), (-0.19, 1.875)]]
+            elif self.handrail_profil == 'SQUARE':
+                x = 0.5 * self.handrail_x
+                y = self.handrail_y
+                handrail = [Vector((-x, y)), Vector((-x, 0)), Vector((x, 0)), Vector((x, y))]
+            elif self.handrail_profil == 'CIRCLE':
+                r = self.handrail_radius
+                handrail = [Vector((r * sin(0.1 * -a * pi), r * (0.5 + cos(0.1 * -a * pi)))) for a in range(0, 20)]
 
-        elif self.handrail_profil == 'SQUARE':
-            x = 0.5 * self.handrail_x
-            y = self.handrail_y
-            handrail = [Vector((-x, y)), Vector((-x, 0)), Vector((x, 0)), Vector((x, y))]
-        elif self.handrail_profil == 'CIRCLE':
-            r = self.handrail_radius
-            handrail = [Vector((r * sin(0.1 * -a * pi), r * (0.5 + cos(0.1 * -a * pi)))) for a in range(0, 20)]
+            if self.right_handrail:
+                g.make_profile(handrail, int(self.idmat_handrail), "RIGHT", self.handrail_slice_right,
+                    self.height, self.step_depth, self.x_offset + offset_x + self.handrail_offset,
+                    self.handrail_alt, self.handrail_extend, verts, faces, matids, uvs)
 
-        if self.right_handrail:
-            g.make_profile(handrail, int(self.idmat_handrail), "RIGHT", self.handrail_slice_right,
-                self.height, self.step_depth, self.x_offset + offset_x + self.handrail_offset,
-                self.handrail_alt, self.handrail_extend, verts, faces, matids, uvs)
+            if self.left_handrail:
+                g.make_profile(handrail, int(self.idmat_handrail), "LEFT", self.handrail_slice_left,
+                    self.height, self.step_depth, -self.x_offset + offset_x + self.handrail_offset,
+                    self.handrail_alt, self.handrail_extend, verts, faces, matids, uvs)
 
-        if self.left_handrail:
-            g.make_profile(handrail, int(self.idmat_handrail), "LEFT", self.handrail_slice_left,
-                self.height, self.step_depth, -self.x_offset + offset_x + self.handrail_offset,
-                self.handrail_alt, self.handrail_extend, verts, faces, matids, uvs)
+            w = 0.5 * self.string_x
+            h = self.string_z
+            string = [Vector((-w, 0)), Vector((w, 0)), Vector((w, h)), Vector((-w, h))]
 
-        w = 0.5 * self.string_x
-        h = self.string_z
-        string = [Vector((-w, 0)), Vector((w, 0)), Vector((w, h)), Vector((-w, h))]
+            if self.right_string:
+                g.make_profile(string, int(self.idmat_string), "RIGHT", False, self.height, self.step_depth,
+                    self.x_offset + 0.5 * self.width + self.string_offset,
+                    self.string_alt, 0, verts, faces, matids, uvs)
 
-        if self.right_string:
-            g.make_profile(string, int(self.idmat_string), "RIGHT", False, self.height, self.step_depth,
-                self.x_offset + 0.5 * self.width + self.string_offset,
-                self.string_alt, 0, verts, faces, matids, uvs)
-
-        if self.left_string:
-            g.make_profile(string, int(self.idmat_string), "LEFT", False, self.height, self.step_depth,
-                -self.x_offset + 0.5 * self.width + self.string_offset,
-                self.string_alt, 0, verts, faces, matids, uvs)
+            if self.left_string:
+                g.make_profile(string, int(self.idmat_string), "LEFT", False, self.height, self.step_depth,
+                    -self.x_offset + 0.5 * self.width + self.string_offset,
+                    self.string_alt, 0, verts, faces, matids, uvs)
 
         bmed.buildmesh(context, o, verts, faces, matids=matids, uvs=uvs, weld=True, clean=True)
         
@@ -2673,7 +2750,6 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
                     # skip only a part of this stair
                 skip_space -= stair.height
         # Boundary
-
         boundary = []
         boundary.append(verts[-2])
         boundary.extend(list(reversed(
@@ -2703,7 +2779,7 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
             return io, geom
 
         lines.append(geom)
-
+        
         # Steps
         coords = [[verts[f], verts[f + 1]] for i, f in enumerate(faces) if i > 0]
         coords.pop()
@@ -2768,7 +2844,7 @@ class archipack_stair(ArchipackObject, Manipulable, DimensionProvider, PropertyG
 
 class ARCHIPACK_PT_stair(Panel):
     bl_idname = "ARCHIPACK_PT_stair"
-    bl_label = "Stair"
+    bl_label = "Stairs"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     # bl_context = 'object'
@@ -2776,7 +2852,7 @@ class ARCHIPACK_PT_stair(Panel):
 
     @classmethod
     def poll(cls, context):
-        return archipack_stair.filter(context.active_object)
+        return archipack_stair.poll(context.active_object)
 
     def draw(self, context):
         prop = archipack_stair.datablock(context.active_object)
@@ -2786,37 +2862,30 @@ class ARCHIPACK_PT_stair(Panel):
         layout = self.layout
         row = layout.row(align=True)
         row.operator('archipack.manipulate', icon='HAND')
-        row = layout.row(align=True)
-        row.prop(prop, 'presets', text="")
         box = layout.box()
         row = box.row(align=True)
         row.operator("archipack.stair_preset_menu", text=bpy.types.ARCHIPACK_OT_stair_preset_menu.bl_label)
         row.operator("archipack.stair_preset", text="", icon='ZOOMIN')
         row.operator("archipack.stair_preset", text="", icon='ZOOMOUT').remove_active = True
+        
         box = layout.box()
+        box.prop(prop, 'presets', text="")
         box.prop(prop, 'width')
         box.prop(prop, 'height')
         box.prop(prop, 'bottom_z')
         box.prop(prop, 'x_offset')
+        
         box = layout.box()
-        box.label(text="Create curves")
-        row = box.row(align=True)
-        row.operator("archipack.stair_to_curve", text="Symbol").mode = 'SYMBOL'
-        op = row.operator("archipack.stair_to_curve", text="Fence")
-        op.mode = 'FENCE'
-        op.min_space = prop.height
-        op = row.operator("archipack.stair_to_curve", text="Hole")
-        op.mode = 'HOLE'
-        op.min_space = prop.height
-        # box.prop(prop, 'z_mode')
-        box = layout.box()
+        row = box.row(align=False)
+        icon = "TRIA_RIGHT"
         if prop.parts_expand:
-            box.prop(prop, 'parts_expand', icon="TRIA_DOWN", text="Parts", icon_only=True, emboss=False)
-        else:
-            box.prop(prop, 'parts_expand', icon="TRIA_RIGHT", text="Parts", icon_only=True, emboss=False)
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'parts_expand', icon=icon, text="Parts", icon_only=True, emboss=True)
+        if prop.presets == 'STAIR_USER':
+            row.prop(prop, 'n_parts')
+            
         if prop.parts_expand:
-            if prop.presets == 'STAIR_USER':
-                box.prop(prop, 'n_parts')
             if prop.presets != 'STAIR_USER':
                 row = box.row(align=True)
                 row.prop(prop, "left_shape", text="")
@@ -2831,24 +2900,30 @@ class ARCHIPACK_PT_stair(Panel):
                     part.draw(layout, context, i, prop.presets == 'STAIR_USER')
 
         box = layout.box()
-        row = box.row()
+        icon = "TRIA_RIGHT"
         if prop.steps_expand:
-            row.prop(prop, 'steps_expand', icon="TRIA_DOWN", icon_only=True, text="Steps", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        box.prop(prop, 'steps_expand', icon=icon, text="Steps", icon_only=True, emboss=True)
+        
+        if prop.steps_expand:
             box.prop(prop, 'steps_type')
             box.prop(prop, 'step_depth')
+            box.label(text=prop.step_count)
+            box.label(text=prop.step_height)
+            box.label(text=prop.step_going)
+            box.label(text=prop.step_pitch)
             box.prop(prop, 'nose_type')
             box.prop(prop, 'nose_z')
             box.prop(prop, 'nose_y')
-        else:
-            row.prop(prop, 'steps_expand', icon="TRIA_RIGHT", icon_only=True, text="Steps", emboss=False)
-
+        
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.handrail_expand:
-            row.prop(prop, 'handrail_expand', icon="TRIA_DOWN", icon_only=True, text="Handrail", emboss=False)
-        else:
-            row.prop(prop, 'handrail_expand', icon="TRIA_RIGHT", icon_only=True, text="Handrail", emboss=False)
-
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'handrail_expand', icon=icon, text="Handrail", icon_only=True, emboss=True)
         row.prop(prop, 'left_handrail')
         row.prop(prop, 'right_handrail')
 
@@ -2868,12 +2943,14 @@ class ARCHIPACK_PT_stair(Panel):
 
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.string_expand:
-            row.prop(prop, 'string_expand', icon="TRIA_DOWN", icon_only=True, text="String", emboss=False)
-        else:
-            row.prop(prop, 'string_expand', icon="TRIA_RIGHT", icon_only=True, text="String", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'string_expand', icon=icon, text="String", icon_only=True, emboss=True)
         row.prop(prop, 'left_string')
         row.prop(prop, 'right_string')
+        
         if prop.string_expand:
             box.prop(prop, 'string_x')
             box.prop(prop, 'string_z')
@@ -2882,12 +2959,14 @@ class ARCHIPACK_PT_stair(Panel):
 
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.post_expand:
-            row.prop(prop, 'post_expand', icon="TRIA_DOWN", icon_only=True, text="Post", emboss=False)
-        else:
-            row.prop(prop, 'post_expand', icon="TRIA_RIGHT", icon_only=True, text="Post", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'post_expand', icon=icon, text="Post", icon_only=True, emboss=True)
         row.prop(prop, 'left_post')
         row.prop(prop, 'right_post')
+        
         if prop.post_expand:
             box.prop(prop, 'post_corners')
             if not prop.post_corners:
@@ -2903,13 +2982,14 @@ class ARCHIPACK_PT_stair(Panel):
 
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.subs_expand:
-            row.prop(prop, 'subs_expand', icon="TRIA_DOWN", icon_only=True, text="Subs", emboss=False)
-        else:
-            row.prop(prop, 'subs_expand', icon="TRIA_RIGHT", icon_only=True, text="Subs", emboss=False)
-
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'subs_expand', icon=icon, text="Subs", icon_only=True, emboss=True)
         row.prop(prop, 'left_subs')
         row.prop(prop, 'right_subs')
+        
         if prop.subs_expand:
             box.prop(prop, 'subs_spacing')
             box.prop(prop, 'subs_x')
@@ -2924,12 +3004,14 @@ class ARCHIPACK_PT_stair(Panel):
 
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.panel_expand:
-            row.prop(prop, 'panel_expand', icon="TRIA_DOWN", icon_only=True, text="Panels", emboss=False)
-        else:
-            row.prop(prop, 'panel_expand', icon="TRIA_RIGHT", icon_only=True, text="Panels", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'panel_expand', icon=icon, text="Panels", icon_only=True, emboss=True)
         row.prop(prop, 'left_panel')
         row.prop(prop, 'right_panel')
+        
         if prop.panel_expand:
             box.prop(prop, 'panel_dist')
             box.prop(prop, 'panel_x')
@@ -2939,12 +3021,14 @@ class ARCHIPACK_PT_stair(Panel):
 
         box = layout.box()
         row = box.row(align=True)
+        icon = "TRIA_RIGHT"
         if prop.rail_expand:
-            row.prop(prop, 'rail_expand', icon="TRIA_DOWN", icon_only=True, text="Rails", emboss=False)
-        else:
-            row.prop(prop, 'rail_expand', icon="TRIA_RIGHT", icon_only=True, text="Rails", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        row.prop(prop, 'rail_expand', icon=icon, text="Rails", icon_only=True, emboss=True)
         row.prop(prop, 'left_rail')
         row.prop(prop, 'right_rail')
+        
         if prop.rail_expand:
             box.prop(prop, 'rail_n')
             for i in range(prop.rail_n):
@@ -2957,10 +3041,13 @@ class ARCHIPACK_PT_stair(Panel):
                 box.prop(prop.rail_mat[i], 'index', text="")
 
         box = layout.box()
-        row = box.row()
-
+        icon = "TRIA_RIGHT"
         if prop.idmats_expand:
-            row.prop(prop, 'idmats_expand', icon="TRIA_DOWN", icon_only=True, text="Materials", emboss=False)
+            icon = "TRIA_DOWN"
+            
+        box.prop(prop, 'idmats_expand', icon=icon, text="Materials", icon_only=True, emboss=True)
+        
+        if prop.idmats_expand:
             box.prop(prop, 'idmat_top')
             box.prop(prop, 'idmat_side')
             box.prop(prop, 'idmat_bottom')
@@ -2972,9 +3059,19 @@ class ARCHIPACK_PT_stair(Panel):
             box.prop(prop, 'idmat_post')
             box.prop(prop, 'idmat_subs')
             box.prop(prop, 'idmat_string')
-        else:
-            row.prop(prop, 'idmats_expand', icon="TRIA_RIGHT", icon_only=True, text="Materials", emboss=False)
-
+        
+        box = layout.box()
+        box.label(text="Create curves")
+        row = box.row(align=True)
+        row.operator("archipack.stair_to_curve", text="Symbol").mode = 'SYMBOL'
+        op = row.operator("archipack.stair_to_curve", text="Fence")
+        op.mode = 'FENCE'
+        op.min_space = prop.height
+        op = row.operator("archipack.stair_to_curve", text="Hole")
+        op.mode = 'HOLE'
+        op.min_space = prop.height
+        # box.prop(prop, 'z_mode')
+        
 
 # ------------------------------------------------------------------
 # Define operator class to create object
@@ -2983,8 +3080,8 @@ class ARCHIPACK_PT_stair(Panel):
 
 class ARCHIPACK_OT_stair(ArchipackCreateTool, Operator):
     bl_idname = "archipack.stair"
-    bl_label = "Stair"
-    bl_description = "Create a Stair"
+    bl_label = "Stairs"
+    bl_description = "Create Stairs"
     bl_category = 'Archipack'
     bl_options = {'REGISTER', 'UNDO'}
 
@@ -2992,9 +3089,10 @@ class ARCHIPACK_OT_stair(ArchipackCreateTool, Operator):
         m = bpy.data.meshes.new("Stair")
         o = bpy.data.objects.new("Stair", m)
         d = m.archipack_stair.add()
-        context.scene.objects.link(o)
-        o.select = True
-        context.scene.objects.active = o
+        # Link object into scene
+        self.link_object_to_scene(context, o)
+        # select and make active
+        self.select_object(context, o, True)
         self.load_preset(d)
         self.add_material(o)
         m.auto_smooth_angle = 0.20944
@@ -3008,8 +3106,7 @@ class ARCHIPACK_OT_stair(ArchipackCreateTool, Operator):
             bpy.ops.object.select_all(action="DESELECT")
             o = self.create(context)
             o.location = context.scene.cursor_location
-            o.select = True
-            context.scene.objects.active = o
+            self.select_object(context, o, True)
             self.manipulate()
             return {'FINISHED'}
         else:
@@ -3017,10 +3114,10 @@ class ARCHIPACK_OT_stair(ArchipackCreateTool, Operator):
             return {'CANCELLED'}
 
 
-class ARCHIPACK_OT_stair_to_curve(Operator):
+class ARCHIPACK_OT_stair_to_curve(ArchipackObjectsManager, Operator):
     bl_idname = "archipack.stair_to_curve"
     bl_label = "To curve"
-    bl_description = "Create curve from stair"
+    bl_description = "Create curve from stairs"
     bl_category = 'Archipack'
     bl_options = {'REGISTER', 'UNDO'}
     mode = EnumProperty(
@@ -3055,8 +3152,7 @@ class ARCHIPACK_OT_stair_to_curve(Operator):
             res = io._to_curve(geom, "{}-{}".format(o.name, self.mode.lower()), '3D')
             if self.mode in {'FENCE', 'HOLE'}:
                 res.location.z = d.height
-            res.select = True
-            context.scene.objects.active = res
+            self.select_object(context, res, True)
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -3068,17 +3164,24 @@ class ARCHIPACK_OT_stair_to_curve(Operator):
 # ------------------------------------------------------------------
 
 
+class ARCHIPACK_OT_stair_preset_create(PresetMenuOperator, Operator):
+    bl_description = "Show Stairs presets and create object at cursor location"
+    bl_idname = "archipack.stair_preset_create"
+    bl_label = "Stair style"
+    preset_subdir = "archipack_stair"
+
+    
 class ARCHIPACK_OT_stair_preset_menu(PresetMenuOperator, Operator):
-    bl_description = "Show Stair Presets"
+    bl_description = "Show Stairs Presets"
     bl_idname = "archipack.stair_preset_menu"
     bl_label = "Stair style"
     preset_subdir = "archipack_stair"
 
 
 class ARCHIPACK_OT_stair_preset(ArchipackPreset, Operator):
-    """Add a Stair Preset"""
+    """Add Stairs Preset"""
     bl_idname = "archipack.stair_preset"
-    bl_label = "Add Stair Style"
+    bl_label = "Add Stairs Style"
     preset_menu = "ARCHIPACK_OT_stair_preset_menu"
 
     @property
@@ -3096,6 +3199,7 @@ def register():
     bpy.utils.register_class(ARCHIPACK_OT_stair_to_curve)
     bpy.utils.register_class(ARCHIPACK_OT_stair_preset_menu)
     bpy.utils.register_class(ARCHIPACK_OT_stair_preset)
+    bpy.utils.register_class(ARCHIPACK_OT_stair_preset_create)
 
 
 def unregister():
@@ -3108,3 +3212,4 @@ def unregister():
     bpy.utils.unregister_class(ARCHIPACK_OT_stair_to_curve)
     bpy.utils.unregister_class(ARCHIPACK_OT_stair_preset_menu)
     bpy.utils.unregister_class(ARCHIPACK_OT_stair_preset)
+    bpy.utils.unregister_class(ARCHIPACK_OT_stair_preset_create)

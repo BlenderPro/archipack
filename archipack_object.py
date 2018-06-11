@@ -26,108 +26,81 @@
 # ----------------------------------------------------------
 # noinspection PyUnresolvedReferences
 import bpy
+major, minor, rev = bpy.app.version
 # noinspection PyUnresolvedReferences
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, StringProperty, EnumProperty
 from mathutils import Vector, Matrix
 from mathutils.geometry import (
     intersect_line_plane
     )
 from bpy_extras import view3d_utils
+from .archipack_iconmanager import icons
+# Abstraction layers for 2.7 and 2.8x series objects to scene management
+if major == 2 and minor > 79:
+    from .archipack_abstraction import ArchipackObjectsManager_28 as ArchipackObjectsManager
+else:
+    from .archipack_abstraction import ArchipackObjectsManager_27 as ArchipackObjectsManager
+
+
 import logging
 logger = logging.getLogger("archipack")
 
 
-class ArchipackObjectsManager():
+def get_enum(self, context):
+    return icons.enum(context, self.__class__.__name__)
+
+
+def preset_operator(self, context):
+    bpy.ops.script.python_file_run(filepath="{}.py".format(self.preset[:-4]))
+
+
+class ArchipackGenericOperator(ArchipackObjectsManager):
     """
-      Provide objects and datablock utility
-      Support meshes curves and lamps
-      - recursive delete objects and datablocks
-      - recursive clone linked
-      - recursive copy
+     Generic operator working on any archipack object
+     Provide generic datablock accessor
+     Polling for selected and active archipack objects
     """
-    def _cleanup_datablock(self, d, typ):
-        if d and d.users < 1:
-            if typ == 'MESH':
-                bpy.data.meshes.remove(d)
-            elif typ == 'CURVE':
-                bpy.data.curves.remove(d)
-            elif typ == 'LAMP':
-                bpy.data.lamps.remove(d)
+    bl_options = {'INTERNAL', 'UNDO'}
 
-    def _delete_object(self, context, o):
-        d = o.data
-        typ = o.type
-        context.scene.objects.unlink(o)
-        bpy.data.objects.remove(o)
-        self._cleanup_datablock(d, typ)
+    @classmethod
+    def poll(cls, context):
+        o = context.active_object
+        return o and ArchipackObjectsManager.is_selected(cls, o) and cls.filter(o)
 
-    def _delete_childs(self, context, o):
-        for child in o.children:
-            self._delete_childs(context, child)
-        self._delete_object(context, o)
-
-    def delete_object(self, context, o):
-        """
-          Recursively delete object and childs
-          Cleanup datablock when needed
-          @o: object to delete
-        """
-        if o is not None:
-            self._delete_childs(context, o)
-
-    def _duplicate_object(self, context, o, linked):
-        new_o = o.copy()
+    @classmethod
+    def filter(cls, o):
         if o.data:
-            if linked:
-                new_o.data = o.data
-            else:
-                new_o.data = o.data.copy()
-        context.scene.objects.link(new_o)
-        return new_o
+            for key in o.data.keys():
+                if "archipack_" in key:
+                    return True
+            for key in o.keys():
+                if "archipack_" in key:
+                    return True
+        return False
 
-    def _duplicate_childs(self, context, o, linked):
-        p = self._duplicate_object(context, o, linked)
-        for child in o.children:
-            c = self._duplicate_childs(context, child, linked)
-            c.parent = p
-            # c.location = child.location.copy()
-            c.matrix_local = child.matrix_local.copy()
-            c.matrix_parent_inverse = child.matrix_parent_inverse.copy()
-        return p
-
-    def duplicate_object(self, context, o, linked):
+    def datablock(self, o):
         """
-          Recursively duplicate object and childs
-          @o: object to duplicate
-          @linked : boolean linked duplicate
-          return parent on success
+         Return archipack datablock from object
         """
-        if o is not None:
-            return self._duplicate_childs(context, o, linked)
-        return None
-
-    def _link_object(self, src, o):
-        if src.data:
-            d = o.data
-            typ = o.type
-            o.data = src.data
-            self._cleanup_datablock(d, typ)
-
-    def _link_child(self, src, o):
-        self._link_object(src, o)
-        if len(src.children) == len(o.children):
-            for i, child in enumerate(src.children):
-                self._link_child(child, o.children[i])
-
-    def link_object(self, src, o):
-        """
-         Recursievely link datablock
-         @src: object source
-         @o: object destination
-         src and o parent child relationship must match
-        """
-        if src is not None:
-            self._link_child(src, o)
+        d = None
+        if o:
+            if o.data:
+                try:
+                    for key in o.data.keys():
+                        if "archipack_" in key:
+                            d = getattr(o.data, key)[0]
+                            break
+                except:
+                    pass
+            if d is None:
+                try:
+                    for key in o.keys():
+                        if "archipack_" in key:
+                            d = getattr(o, key)[0]
+                            break
+                except:
+                    pass
+        return d
 
 
 class ArchipackObject(ArchipackObjectsManager):
@@ -136,6 +109,13 @@ class ArchipackObject(ArchipackObjectsManager):
         provide basic support for copy to selected
         and datablock access / filtering by object
     """
+
+    preset = EnumProperty(
+        name="Preset",
+        description="Preset thumbs available right on object panel",
+        items=get_enum,
+        update=preset_operator
+        )
 
     def iskindof(self, o, typ):
         """
@@ -164,6 +144,24 @@ class ArchipackObject(ArchipackObjectsManager):
                 res = cls.__name__ in o
             except:
                 pass
+        return res
+
+    @classmethod
+    def poll(cls, o):
+        """
+            Filter object with this class in data
+            return
+            True when object contains this datablock
+            False otherwhise
+            usage:
+            class_name.filter(object) from outside world
+            self.__class__.filter(object) from instance
+        """
+        res = False
+        try:
+            res = ArchipackObjectsManager.is_selected(cls, o) and cls.filter(o)
+        except:
+            pass
         return res
 
     @classmethod
@@ -220,12 +218,10 @@ class ArchipackObject(ArchipackObjectsManager):
 
         try:
             for o in self.previously_selected:
-                o.select = True
+                self.select_object(context, o, False)
         except:
             pass
-        if self.previously_active is not None:
-            self.previously_active.select = True
-            context.scene.objects.active = self.previously_active
+        self.select_object(context, self.previously_active, True)
         self.previously_selected = None
         self.previously_active = None
 
@@ -234,6 +230,8 @@ class ArchipackCreateTool(ArchipackObjectsManager):
     """
         Shared property of archipack's create tool Operator
     """
+    bl_options = {'INTERNAL', 'UNDO'}
+
     auto_manipulate = BoolProperty(
             name="Auto manipulate",
             description="Enable object's manipulators after create",
@@ -304,11 +302,18 @@ class ArchipackCreateTool(ArchipackObjectsManager):
                 print("Archipack bpy.ops.archipack.%s_manipulate not found" % (self.archipack_category))
                 pass
 
+    def invoke(self, context, event):
+        return self.execute(context)
+
 
 class ArchipackDrawTool(ArchipackObjectsManager):
     """
         Draw tools
     """
+    bl_options = {'INTERNAL', 'UNDO'}
+    
+    disabled_walls = {}
+    
     def region_2d_to_orig_and_vect(self, context, event):
 
         region = context.region
@@ -358,11 +363,20 @@ class ArchipackDrawTool(ArchipackObjectsManager):
             convert mouse pos to 3d point over plane defined by origin and normal
         """
         is_perspective, orig, vec = self.region_2d_to_orig_and_vect(context, event)
-        res, pos, normal, face_index, object, matrix_world = context.scene.ray_cast(
+        res, pos, normal, face_index, object, matrix_world = self.scene_ray_cast(
+            context,
             orig,
             vec)
         return res, pos, normal, face_index, object, matrix_world
-
+    
+    def restore_walls(self, context):
+        """
+         Enable finish on wall
+        """
+        for name, o in self.disabled_walls.items():        
+            d = o.data.archipack_wall2[0]
+            d.finish_enable = True
+        
     def mouse_hover_wall(self, context, event):
         """
             convert mouse pos to matrix at bottom of surrounded wall, y oriented outside wall
@@ -375,7 +389,20 @@ class ArchipackDrawTool(ArchipackObjectsManager):
             x = y.cross(z)
 
             if 'archipack_wall2' in o.data:
+                
                 d = o.data.archipack_wall2[0]
+                
+                # @TODO:
+                # identify wall segment and pass finishing overflow_out
+                
+                if d.finish_enable and len(d.finish) > 0:
+                    print("Disable finish for %s" % o.name)
+                    last = context.active_object
+                    self.select_object(context, o, True)
+                    d.finish_enable = False
+                    self.disabled_walls[o.name] = o
+                    self.select_object(context, last, True)
+                    
                 pt += (0.5 * d.width) * y.normalized()
                 return True, Matrix([
                     [x.x, y.x, z.x, pt.x],
@@ -399,7 +426,7 @@ class ArchipackDrawTool(ArchipackObjectsManager):
                     dp)
                 if res:
                     width = (pt - pos).to_2d().length
-                    print("hit:%s  w:%s  pt:%s pos:%s" % (object.name, width, pt, pos))
+                    # print("hit:%s  w:%s  pt:%s pos:%s" % (object.name, width, pt, pos))
                     p1 = pt + (0.5 * width) * y.normalized()
                     return True, Matrix([
                         [x.x, y.x, z.x, p1.x],

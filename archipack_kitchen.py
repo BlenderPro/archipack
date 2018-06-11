@@ -1754,10 +1754,10 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
             description="disable auto update to avoid infinite recursion",
             default=True
             )
-            
-    # DimensionProvider        
+
+    # DimensionProvider
     uid = IntProperty(default=0)
-    
+
     @property
     def location(self):
         """
@@ -1871,11 +1871,12 @@ class archipack_kitchen_cabinet(ArchipackObject, PropertyGroup):
     def draw(self, box, num, prop):
 
         row = box.row(align=True)
-
+        
+        icon = "TRIA_RIGHT"
         if self.expand:
-            row.prop(self, "expand", icon="TRIA_DOWN", icon_only=True, text="Cabinet " + str(num + 1), emboss=False)
-        else:
-            row.prop(self, "expand", icon="TRIA_RIGHT", icon_only=True, text="Cabinet " + str(num + 1), emboss=False)
+            icon = "TRIA_DOWN"
+        
+        row.prop(self, "expand", icon=icon, icon_only=True, text="Cab {}".format(num + 1), emboss=True)
         row.prop(self, 'cab_location', text="")
         row.prop(self, 'type', text="")
         row.operator("archipack.kitchen_insert", icon="ZOOMIN", text="").index = num
@@ -2453,11 +2454,11 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
                 m_right,
                 (-m_dist, 0, 0)
                 ])
-                
+
         # Dimension points of cab
         self.add_dimension_point(cab.uid, m_left)
         self.add_dimension_point(cab.uid + 1, m_right)
-        
+
         if cab_type == 1:
             # Corner L side
             m_left = tM * Vector((x, - door_y - y, z0))
@@ -3704,9 +3705,11 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
                             m.auto_smooth_angle = 0.390953
                             child = bpy.data.objects.new(name, m)
                             props = m.archipack_kitchen_module.add()
-                            context.scene.objects.link(child)
-                            child.select = True
-                            context.scene.objects.active = child
+                            # Link object into scene
+                            self.link_object_to_scene(context, child)
+                            
+                            # select and make active
+                            self.select_object(context, child, True)
                             m = child.archipack_material.add()
                             m.category = "kitchen"
                             m.material = o.archipack_material[0].material
@@ -3721,14 +3724,14 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
 
                         else:
                             child = childs[panel]
-                            child.select = True
-                            context.scene.objects.active = child
+                            # select and make active
+                            self.select_object(context, child, True)
                             props = archipack_kitchen_module.datablock(child)
 
                         if props is not None:
                             props.update(context, size, pivot, self, cab, module, handle_location)
 
-                        child.select = False
+                        self.unselect_object(child)
                         half_gap = 0.5 * self.door_gap
                         # location y + frame width.
                         child.location = tM * Vector((
@@ -3845,7 +3848,7 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
             cab.update_parts()
             if cab.uid == 0:
                 self.create_uid(cab, increment=4)
-        
+
         self.setup_manipulators()
 
     def update(self, context, manipulable_refresh=False):
@@ -3893,9 +3896,10 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
 
         if manipulable_refresh:
             self.manipulable_refresh = True
-        
+
         self.update_dimensions(context, o)
-        
+
+        # restore context
         self.restore_context(context)
 
     def draw_ui(self,layout):
@@ -3927,14 +3931,25 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
             row.label("Tall Cabinets:")
             row.prop(self, 'z_full',text="Height")            
 
-            row = box.row(align=True)
-            row.label("Part Thickness:")
-            row.prop(self, 'thickness',text="")
-
-            box = col.box()
-            box.label("Counter Top")
-            box.prop(self, "counter",text="Add Counter Top")
-            if self.counter:
+        box = layout.box()
+        row = box.row(align=False)
+        icon = "TRIA_RIGHT"
+        if self.expand:
+            icon = "TRIA_DOWN"
+            
+        row.prop(self, 'expand', icon=icon, text="Kitchen", icon_only=True, emboss=True)
+        # Cabinet number
+        row.prop(self, 'cabinet_num')
+        
+        if self.expand:
+            
+            row = box.row()
+            row.prop(self, 'z_mode', text="")
+            if self.z_mode == '1':
+                row.prop(self, 'module_size')
+                row = box.row()
+                row.prop(self, 'modules_default')
+                row.prop(self, 'y')
                 row = box.row()
                 row.label("Counter Top Thickness:")
                 row.prop(self, "counter_z",text="")
@@ -4003,7 +4018,6 @@ class archipack_kitchen(ArchipackObject, Manipulable, DimensionProvider, Propert
             for i, cab in enumerate(self.cabinets):
                 cabinet_box = col.box()
                 cab.draw(cabinet_box, i, self)
-
 
 class ARCHIPACK_PT_kitchen(Panel):
     bl_idname = "ARCHIPACK_PT_kitchen"
@@ -4093,9 +4107,11 @@ class ARCHIPACK_OT_kitchen(ArchipackCreateTool, Operator):
         d.thickness = self.thickness
         d.y = self.y
         d.z = self.z
-        context.scene.objects.link(o)
-        o.select = True
-        context.scene.objects.active = o
+        # Link object into scene
+        self.link_object_to_scene(context, o)
+        
+        # select and make active
+        self.select_object(context, o, True)
         self.add_material(o)
         self.load_preset(d)
         # select frame
@@ -4112,8 +4128,8 @@ class ARCHIPACK_OT_kitchen(ArchipackCreateTool, Operator):
             if self.mode == 'CREATE':
                 o = self.create(context)
                 o.location = bpy.context.scene.cursor_location
-                o.select = True
-                context.scene.objects.active = o
+                # select and make active
+                self.select_object(context, o, True)
                 self.manipulate()
             else:
                 o = context.active_object
@@ -4175,6 +4191,13 @@ class ARCHIPACK_OT_kitchen_remove(Operator):
 # ------------------------------------------------------------------
 
 
+class ARCHIPACK_OT_kitchen_preset_create(PresetMenuOperator, Operator):
+    bl_description = "Show Kitchen Presets and create object at cursor location"
+    bl_idname = "archipack.kitchen_preset_create"
+    bl_label = "Kitchen Presets"
+    preset_subdir = "archipack_kitchen"
+
+
 class ARCHIPACK_OT_kitchen_preset_menu(PresetMenuOperator, Operator):
     bl_description = "Show Kitchen Presets"
     bl_idname = "archipack.kitchen_preset_menu"
@@ -4213,6 +4236,7 @@ def register():
     bpy.utils.register_class(archipack_kitchen)
     Mesh.archipack_kitchen = CollectionProperty(type=archipack_kitchen)
     bpy.utils.register_class(ARCHIPACK_OT_kitchen_preset_menu)
+    bpy.utils.register_class(ARCHIPACK_OT_kitchen_preset_create)
     bpy.utils.register_class(ARCHIPACK_PT_kitchen)
     bpy.utils.register_class(ARCHIPACK_OT_kitchen)
     bpy.utils.register_class(ARCHIPACK_OT_kitchen_remove)
@@ -4228,6 +4252,7 @@ def unregister():
     bpy.utils.unregister_class(archipack_kitchen)
     del Mesh.archipack_kitchen
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_preset_menu)
+    bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_preset_create)
     bpy.utils.unregister_class(ARCHIPACK_PT_kitchen)
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen)
     bpy.utils.unregister_class(ARCHIPACK_OT_kitchen_remove)

@@ -35,12 +35,13 @@ from bpy.props import (
     )
 from mathutils import Vector
 from .bmesh_utils import BmeshEdit as bmed
+from .archipack_object import ArchipackObjectsManager
 
 
 def update(self, context):
     self.update(context)
 
-
+   
 class archipack_reference_point(PropertyGroup):
     location_2d = FloatVectorProperty(
         subtype='XYZ',
@@ -64,6 +65,12 @@ class archipack_reference_point(PropertyGroup):
             ('WALL', 'Wall', '', 0),
             ('ROOF', 'Roof', '', 1)),
         update=update)
+
+    @classmethod
+    def poll(cls, o):
+        return o and \
+            ArchipackObjectsManager.is_selected(cls, o) and \
+            archipack_reference_point.filter(o)
 
     @classmethod
     def filter(cls, o):
@@ -182,7 +189,7 @@ class ARCHIPACK_PT_reference_point(Panel):
 
     @classmethod
     def poll(cls, context):
-        return archipack_reference_point.filter(context.active_object)
+        return archipack_reference_point.poll(context.active_object)
 
     def draw(self, context):
         o = context.active_object
@@ -190,15 +197,89 @@ class ARCHIPACK_PT_reference_point(Panel):
         if props is None:
             return
         layout = self.layout
-        if (o.location - props.location_2d).length < 0.01:
+        if (o.matrix_world.translation - props.location_2d).length < 0.01:
             layout.operator('archipack.move_to_3d')
             layout.operator('archipack.move_2d_reference_to_cursor')
         else:
             layout.operator('archipack.move_to_2d')
+            layout.operator('archipack.store_2d_reference')
         layout.prop(props, 'symbol_scale')
 
 
-class ARCHIPACK_OT_reference_point(Operator):
+class ARCHIPACK_OT_add_reference_point(ArchipackObjectsManager, Operator):
+    """Add reference point"""
+    bl_idname = "archipack.add_reference_point"
+    bl_label = "Reference point"
+    bl_description = "Add reference point"
+    bl_category = 'Archipack'
+    bl_options = {'REGISTER', 'UNDO'}
+    
+    symbol_type = EnumProperty(
+        name="Symbol type",
+        default='WALL',
+        items=(
+            ('WALL', 'Wall', '', 0),
+            ('ROOF', 'Roof', '', 1))
+        )
+
+    @classmethod
+    def poll(cls, context):
+        o = context.active_object
+        return o is not None and o.data and "archipack_wall2" in o.data
+        
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row()
+        row.label("Use Properties panel (N) to define parms", icon='INFO')
+
+    def create(self, context, loc, location_3d=Vector((0, 0, 0))):
+        x, y, z = loc
+        m = bpy.data.meshes.new(name="Reference")
+        o = bpy.data.objects.new("Reference", m)
+        o.location = loc
+        d = o.archipack_reference_point.add()
+        d.location_2d = Vector((x, y, 0))
+        d.location_3d = location_3d
+        self.link_object_to_scene(context, o)
+        self.select_object(context, o, True)
+        d.update(context)
+        self.unselect_object(o)
+        return o
+        
+    def parent_to_reference(self, context, o):
+        """
+         o: reference point object
+         parent selected objects to reference point
+        """
+        sel = [obj for obj in context.selected_objects if obj != o and obj.parent != o]
+        itM = o.matrix_world.inverted()
+        # print("parent_to_reference parenting:%s objects" % (len(sel)))
+        for child in sel:
+            rs = child.matrix_world.to_3x3().to_4x4()
+            loc = itM * child.matrix_world.translation
+            child.parent = None
+            child.matrix_parent_inverse.identity()
+            child.location = Vector((0, 0, 0))
+            child.parent = o
+            child.matrix_world = rs
+            child.location = loc
+            
+    def execute(self, context):
+        if context.mode == "OBJECT":
+            wall = context.active_object
+            if wall.parent is None:
+                loc = wall.matrix_world * Vector(wall.bound_box[0])
+                o = self.create(context, loc)
+            else:
+                o = wall.parent
+            self.parent_to_reference(context, o)
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
+            return {'CANCELLED'}
+        
+        
+class ARCHIPACK_OT_reference_point(ArchipackObjectsManager, Operator):
     """Add reference point"""
     bl_idname = "archipack.reference_point"
     bl_label = "Reference point"
@@ -227,27 +308,14 @@ class ARCHIPACK_OT_reference_point(Operator):
         row = layout.row()
         row.label("Use Properties panel (N) to define parms", icon='INFO')
 
-    def create(self, context):
-        x, y, z = context.scene.cursor_location
-        # bpy.ops.object.empty_add(type='ARROWS', radius=0.5, location=Vector((x, y, 0)))
-        m = bpy.data.meshes.new(name="Reference")
-        o = bpy.data.objects.new("Reference", m)
-        o.location = Vector((x, y, 0))
-        context.scene.objects.link(o)
-        d = o.archipack_reference_point.add()
-        d.location_2d = Vector((x, y, 0))
-        d.location_3d = self.location_3d
-        d.symbol_type = self.symbol_type
-        o.select = True
-        context.scene.objects.active = o
-        d.update(context)
-        return o
-
     def execute(self, context):
         if context.mode == "OBJECT":
-            o = self.create(context)
-            o.select = True
-            context.scene.objects.active = o
+            o = ARCHIPACK_OT_add_reference_point.create(
+                self, 
+                context, 
+                context.scene.cursor_location
+                )
+            self.select_object(context, o, True)
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -263,7 +331,7 @@ class ARCHIPACK_OT_move_to_3d(Operator):
 
     @classmethod
     def poll(cls, context):
-        return archipack_reference_point.filter(context.active_object)
+        return archipack_reference_point.poll(context.active_object)
 
     def execute(self, context):
         if context.mode == "OBJECT":
@@ -271,7 +339,7 @@ class ARCHIPACK_OT_move_to_3d(Operator):
             props = archipack_reference_point.datablock(o)
             if props is None:
                 return {'CANCELLED'}
-            o.location = props.location_3d
+            o.matrix_world.translation = props.location_3d
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -293,7 +361,7 @@ class ARCHIPACK_OT_kill_archipack(Operator):
     def apply(self, context, objects):
 
         for o in objects:
-        
+
             keys = o.keys()
             for key in keys:
                 if "archipack_" in key:
@@ -306,16 +374,16 @@ class ARCHIPACK_OT_kill_archipack(Operator):
                         del o[key]
                     except:
                         pass
-                        
+
             if o.data is not None:
                 keys = o.data.keys()
                 for key in keys:
                     if "archipack_" in key:
                         o.data.property_unset(key)
-    
+
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
-    
+
     def execute(self, context):
         if context.mode == "OBJECT":
 
@@ -330,8 +398,8 @@ class ARCHIPACK_OT_kill_archipack(Operator):
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
             return {'CANCELLED'}
-            
-            
+
+
 class ARCHIPACK_OT_move_to_2d(Operator):
     bl_idname = "archipack.move_to_2d"
     bl_label = "Move to 2d"
@@ -341,7 +409,7 @@ class ARCHIPACK_OT_move_to_2d(Operator):
 
     @classmethod
     def poll(cls, context):
-        return archipack_reference_point.filter(context.active_object)
+        return archipack_reference_point.poll(context.active_object)
 
     def execute(self, context):
         if context.mode == "OBJECT":
@@ -349,8 +417,8 @@ class ARCHIPACK_OT_move_to_2d(Operator):
             props = archipack_reference_point.datablock(o)
             if props is None:
                 return {'CANCELLED'}
-            props.location_3d = o.location
-            o.location = props.location_2d
+            props.location_3d = o.matrix_world.translation
+            o.matrix_world.translation = props.location_2d
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -366,7 +434,7 @@ class ARCHIPACK_OT_store_2d_reference(Operator):
 
     @classmethod
     def poll(cls, context):
-        return archipack_reference_point.filter(context.active_object)
+        return archipack_reference_point.poll(context.active_object)
 
     def execute(self, context):
         if context.mode == "OBJECT":
@@ -374,7 +442,7 @@ class ARCHIPACK_OT_store_2d_reference(Operator):
             props = archipack_reference_point.datablock(o)
             if props is None:
                 return {'CANCELLED'}
-            x, y, z = o.location
+            x, y, z = o.matrix_world.translation
             props.location_2d = Vector((x, y, 0))
             return {'FINISHED'}
         else:
@@ -382,7 +450,7 @@ class ARCHIPACK_OT_store_2d_reference(Operator):
             return {'CANCELLED'}
 
 
-class ARCHIPACK_OT_move_2d_reference_to_cursor(Operator):
+class ARCHIPACK_OT_move_2d_reference_to_cursor(ArchipackObjectsManager, Operator):
     bl_idname = "archipack.move_2d_reference_to_cursor"
     bl_label = "Change 2d"
     bl_description = "Change 2d reference position to cursor location without moving childs"
@@ -391,20 +459,29 @@ class ARCHIPACK_OT_move_2d_reference_to_cursor(Operator):
 
     @classmethod
     def poll(cls, context):
-        return archipack_reference_point.filter(context.active_object)
+        return archipack_reference_point.poll(context.active_object)
 
     def execute(self, context):
         if context.mode == "OBJECT":
             o = context.active_object
-            props = archipack_reference_point.datablock(o)
-            if props is None:
+            d = archipack_reference_point.datablock(o)
+            if d is None:
                 return {'CANCELLED'}
             bpy.ops.object.select_all(action="DESELECT")
-            bpy.ops.archipack.reference_point(location_3d=props.location_3d)
+            ref = ARCHIPACK_OT_add_reference_point.create(
+                self, 
+                context, 
+                context.scene.cursor_location,
+                location_3d=d.location_3d
+                )
             for child in o.children:
-                child.select = True
-            bpy.ops.archipack.parent_to_reference()
-            context.scene.objects.unlink(o)
+                self.select_object(context, child)
+            ARCHIPACK_OT_add_reference_point.parent_to_reference(
+                self, 
+                context,
+                ref
+                )
+            self.delete_object(context, o)
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -420,26 +497,21 @@ class ARCHIPACK_OT_parent_to_reference(Operator):
 
     @classmethod
     def poll(cls, context):
+        # filter only: reference point dosen't need to be selected
         return archipack_reference_point.filter(context.active_object)
 
     def execute(self, context):
         if context.mode == "OBJECT":
             o = context.active_object
-            props = archipack_reference_point.datablock(o)
-            if props is None:
+            d = archipack_reference_point.datablock(o)
+            if d is None:
                 return {'CANCELLED'}
-            sel = [obj for obj in context.selected_objects if obj != o and obj.parent != o]
-            itM = o.matrix_world.inverted()
-            # print("parent_to_reference parenting:%s objects" % (len(sel)))
-            for child in sel:
-                rs = child.matrix_world.to_3x3().to_4x4()
-                loc = itM * child.matrix_world.translation
-                child.parent = None
-                child.matrix_parent_inverse.identity()
-                child.location = Vector((0, 0, 0))
-                child.parent = o
-                child.matrix_world = rs
-                child.location = loc
+            
+            ARCHIPACK_OT_add_reference_point.parent_to_reference(
+                self, 
+                context,
+                o
+                )
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -451,6 +523,7 @@ def register():
     Object.archipack_reference_point = CollectionProperty(type=archipack_reference_point)
     bpy.utils.register_class(ARCHIPACK_PT_reference_point)
     bpy.utils.register_class(ARCHIPACK_OT_reference_point)
+    bpy.utils.register_class(ARCHIPACK_OT_add_reference_point)
     bpy.utils.register_class(ARCHIPACK_OT_move_to_3d)
     bpy.utils.register_class(ARCHIPACK_OT_move_to_2d)
     bpy.utils.register_class(ARCHIPACK_OT_store_2d_reference)
@@ -464,6 +537,7 @@ def unregister():
     del Object.archipack_reference_point
     bpy.utils.unregister_class(ARCHIPACK_PT_reference_point)
     bpy.utils.unregister_class(ARCHIPACK_OT_reference_point)
+    bpy.utils.unregister_class(ARCHIPACK_OT_add_reference_point)
     bpy.utils.unregister_class(ARCHIPACK_OT_move_to_3d)
     bpy.utils.unregister_class(ARCHIPACK_OT_move_to_2d)
     bpy.utils.unregister_class(ARCHIPACK_OT_store_2d_reference)

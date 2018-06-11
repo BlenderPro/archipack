@@ -24,6 +24,7 @@
 # Author: Stephen Leger (s-leger)
 #
 # ----------------------------------------------------------
+import time
 # noinspection PyUnresolvedReferences
 import bpy
 # noinspection PyUnresolvedReferences
@@ -35,205 +36,62 @@ from bpy.props import (
     )
 import bmesh
 from mathutils import Vector, Matrix
-from mathutils.geometry import interpolate_bezier
-from math import sin, cos, pi, atan2
+from math import pi
 from .archipack_manipulator import Manipulable, archipack_manipulator
-from .archipack_object import ArchipackCreateTool, ArchipackObject
-from .archipack_2d import Line, Arc
+from .archipack_object import (
+    ArchipackCreateTool,
+    ArchipackObject,
+    ArchipackObjectsManager
+    )
 from .archipack_cutter import (
     CutAblePolygon, CutAbleGenerator,
     ArchipackCutter,
-    ArchipackCutterPart
+    ArchipackCutterPart,
+    update_operation
     )
 from .archipack_dimension import DimensionProvider
-from .archipack_curveman import ArchipackCurveManager
+from .archipack_curveman import ArchipackUserDefinedPath
+from .archipack_segments import ArchipackSegment
+from .archipack_polylines import CoordSys, Qtree
+import logging
+logger = logging.getLogger("archipack")
 
 
-class Slab():
+class Q_tree(Qtree):
+    """
+     A quadtree to minimize relocate intersections
+    """
+    def getbounds(self, seg, extend=0):
+        x0, y0 = seg.p0.x, seg.p0.y
+        x1, y1 = seg.p1.x, seg.p1.y
+        return (min(x0, x1),
+            min(y0, y1),
+            max(x0, x1),
+            max(y0, y1))
 
-    def __init__(self):
-        # self.colour_inactive = (1, 1, 1, 1)
-        pass
+    def intersects(self, pt, extend):
+        x, y = pt.x, pt.y
+        bounds = (x - extend,
+            y - extend,
+            x + extend,
+            y + extend)
+        selection = list(self._intersect(bounds))
+        count = len(selection)
+        return count, sorted(selection)
 
-    def set_offset(self, offset, last=None):
-        """
-            Offset line and compute intersection point
-            between segments
-        """
-        self.line = self.make_offset(offset, last)
-
-    def straight_slab(self, a0, length):
-        s = self.straight(length).rotate(a0)
-        return StraightSlab(s.p, s.v)
-
-    def curved_slab(self, a0, da, radius):
-        n = self.normal(1).rotate(a0).scale(radius)
-        if da < 0:
-            n.v = -n.v
-        a0 = n.angle
-        c = n.p - n.v
-        return CurvedSlab(c, radius, a0, da)
-
-
-class StraightSlab(Slab, Line):
-
-    def __init__(self, p, v):
-        Line.__init__(self, p, v)
-        Slab.__init__(self)
-
-
-class CurvedSlab(Slab, Arc):
-
-    def __init__(self, c, radius, a0, da):
-        Arc.__init__(self, c, radius, a0, da)
-        Slab.__init__(self)
+    def insert(self, seg):
+        idx = self.ngeoms
+        self._geoms.append(seg)
+        self._insert(idx, self.getbounds(seg))
 
 
 class SlabGenerator(CutAblePolygon, CutAbleGenerator):
 
-    def __init__(self, d):
-        self.d = d
-        self.parts = d.parts
-        self.segs = []
-        self.holes = []
-        self.convex = True
-        self.xsize = 0
-
-    def add_part(self, part):
-
-        if len(self.segs) < 1:
-            s = None
-        else:
-            s = self.segs[-1]
-        # start a new slab
-        if s is None:
-            if part.type == 'S_SEG':
-                p = Vector((0, 0))
-                v = part.length * Vector((cos(part.a0), sin(part.a0)))
-                s = StraightSlab(p, v)
-            elif part.type == 'C_SEG':
-                c = -part.radius * Vector((cos(part.a0), sin(part.a0)))
-                s = CurvedSlab(c, part.radius, part.a0, part.da)
-        else:
-            if part.type == 'S_SEG':
-                s = s.straight_slab(part.a0, part.length)
-            elif part.type == 'C_SEG':
-                s = s.curved_slab(part.a0, part.da, part.radius)
-
-        self.segs.append(s)
-        self.last_type = part.type
-
-    def set_offset(self, offset):
-        last = None
-        for i, seg in enumerate(self.segs):
-            seg.set_offset(offset + self.parts[i].offset, last)
-            last = seg.line
-
-    def close(self, offset):
-        # Make last segment implicit closing one
-        part = self.parts[-1]
-        w = self.segs[-1]
-        dp = self.segs[0].p0 - self.segs[-1].p0
-        if "C_" in part.type:
-            dw = (w.p1 - w.p0)
-            w.r = part.radius / dw.length * dp.length
-            # angle pt - p0        - angle p0 p1
-            da = atan2(dp.y, dp.x) - atan2(dw.y, dw.x)
-            a0 = w.a0 + da
-            if a0 > pi:
-                a0 -= 2 * pi
-            if a0 < -pi:
-                a0 += 2 * pi
-            w.a0 = a0
-        else:
-            w.v = dp
-
-        if len(self.segs) > 1:
-            w.line = w.make_offset(offset + part.offset, self.segs[-2].line)
-
-        p1 = self.segs[0].line.p1
-        self.segs[0].line = self.segs[0].make_offset(offset + self.parts[0].offset, w.line)
-        self.segs[0].line.p1 = p1
-
-    def locate_manipulators(self):
-        """
-            setup manipulators
-        """
-        for i, f in enumerate(self.segs):
-            part = self.parts[i]
-            manipulators = part.manipulators
-            p0 = f.p0.to_3d()
-            p1 = f.p1.to_3d()
-            # angle from last to current segment
-            if i > 0:
-                v0 = self.segs[i - 1].straight(-1, 1).v.to_3d()
-                v1 = f.straight(1, 0).v.to_3d()
-                manipulators[0].set_pts([p0, v0, v1])
-
-            if type(f).__name__ == "StraightSlab":
-                # segment length
-                manipulators[1].type_key = 'SIZE'
-                manipulators[1].prop1_name = "length"
-                manipulators[1].set_pts([p0, p1, (1, 0, 0)])
-            else:
-                # segment radius + angle
-                v0 = (f.p0 - f.c).to_3d()
-                v1 = (f.p1 - f.c).to_3d()
-                manipulators[1].type_key = 'ARC_ANGLE_RADIUS'
-                manipulators[1].prop1_name = "da"
-                manipulators[1].prop2_name = "radius"
-                manipulators[1].set_pts([f.c.to_3d(), v0, v1])
-
-            # snap manipulator, dont change index !
-            manipulators[2].set_pts([p0, p1, (1, 0, 0)])
-            # dumb segment id
-            manipulators[3].set_pts([p0, p1, (1, 0, 0)])
-
-            # Dimensions points
-            self.d.add_dimension_point(part.uid, p0)
+    def __init__(self, d, o=None):
+        CutAbleGenerator.__init__(self, d, o)
 
     def get_verts(self, verts):
         verts.extend([s.p0.to_3d() for s in self.segs])
-
-    def rotate(self, idx_from, a):
-        """
-            apply rotation to all following segs
-        """
-        self.segs[idx_from].rotate(a)
-        ca = cos(a)
-        sa = sin(a)
-        rM = Matrix([
-            [ca, -sa],
-            [sa, ca]
-            ])
-        # rotation center
-        p0 = self.segs[idx_from].p0
-        for i in range(idx_from + 1, len(self.segs)):
-            seg = self.segs[i]
-            # rotate seg
-            seg.rotate(a)
-            # rotate delta from rotation center to segment start
-            dp = rM * (seg.p0 - p0)
-            seg.translate(dp)
-
-    def translate(self, idx_from, dp):
-        """
-            apply translation to all following segs
-        """
-        self.segs[idx_from].p1 += dp
-        for i in range(idx_from + 1, len(self.segs)):
-            self.segs[i].translate(dp)
-
-    def draw(self, context):
-        """
-            draw generator using gl
-        """
-        for seg in self.segs:
-            seg.draw(context, render=False)
-
-    def limits(self):
-        x_size = [s.p0.x for s in self.segs]
-        self.xsize = max(x_size) - min(x_size)
 
     def cut(self, context, o):
         """
@@ -246,8 +104,9 @@ class SlabGenerator(CutAblePolygon, CutAbleGenerator):
         for b in o.children:
             d = archipack_slab_cutter.datablock(b)
             if d is not None:
-                g = d.ensure_direction()
-                g.change_coordsys(b.matrix_world, o.matrix_world)
+                tM = o.matrix_world.inverted() * b.matrix_world
+                g = d.ensure_direction(tM)
+                # g.change_coordsys(b.matrix_world, o.matrix_world)
                 self.slice(g)
 
     def slab(self, context, o, d):
@@ -328,238 +187,88 @@ class archipack_slab_material(PropertyGroup):
         """
         selected = [o for o in context.selected_objects]
         for o in selected:
-            props = archipack_slab.datablock(o)
-            if props:
-                for part in props.rail_mat:
+            d = archipack_slab.datablock(o)
+            if d:
+                for part in d.rail_mat:
                     if part == self:
-                        return props
+                        return d
         return None
 
     def update(self, context):
-        props = self.find_in_selection(context)
-        if props is not None:
-            props.update(context)
+        d = self.find_in_selection(context)
+        if d is not None:
+            d.update(context)
 
 
-class archipack_slab_child(PropertyGroup):
-    """
-        Store child fences to be able to sync
-    """
-    child_name = StringProperty()
-    idx = IntProperty()
+class archipack_slab_relocate_child(PropertyGroup):
+    child_name = StringProperty(
+        description="Name of child object"
+        )
+    child_idx = IntProperty(
+        default=-1,
+        description="Index of linked child part (startpoint) when -1 set object location"
+        )
+    seg0 = IntProperty(
+        description="Index of parent segment 0 the point is bound to"
+        )
+    seg1 = IntProperty(
+        description="Index of parent segment 1 the point is bound to"
+        )
+    d0 = FloatProperty(
+        description="Distance from parent segment 0 the point is bound to"
+        )
+    d1 = FloatProperty(
+        description="Distance from parent segment 1 the point is bound to"
+        )
+    t = FloatProperty(
+        description="Distance from start of closest segment normalized"
+        )
+
+    def filter_child(self, o):
+        d = None
+        if o and o.data and "archipack_fence" in o.data:
+                d = o.data.archipack_fence[0]
+        return d
 
     def get_child(self, context):
         d = None
-        child = context.scene.objects.get(self.child_name)
-        if child is not None and child.data is not None:
-            if 'archipack_fence' in child.data:
-                d = child.data.archipack_fence[0]
-        return child, d
+        o = context.scene.objects.get(self.child_name)
+        d = self.filter_child(o)
+        return o, d
 
-
-def update_type(self, context):
-
-    d = self.find_in_selection(context)
-
-    if d is not None and d.auto_update:
-
-        d.auto_update = False
-        # find part index
-        idx = 0
-        for i, part in enumerate(d.parts):
-            if part == self:
-                idx = i
-                break
-
-        part = d.parts[idx]
-        a0 = 0
-        if idx > 0:
-            g = d.get_generator()
-            w0 = g.segs[idx - 1]
-            a0 = w0.straight(1).angle
-            if "C_" in self.type:
-                w = w0.straight_slab(part.a0, part.length)
-            else:
-                w = w0.curved_slab(part.a0, part.da, part.radius)
-        else:
-            if "C_" in self.type:
-                p = Vector((0, 0))
-                v = self.length * Vector((cos(self.a0), sin(self.a0)))
-                w = StraightSlab(p, v)
-                a0 = pi / 2
-            else:
-                c = -self.radius * Vector((cos(self.a0), sin(self.a0)))
-                w = CurvedSlab(c, self.radius, self.a0, pi)
-
-        # w0 - w - w1
-        if idx + 1 == d.n_parts:
-            dp = - w.p0
-        else:
-            dp = w.p1 - w.p0
-
-        if "C_" in self.type:
-            part.radius = 0.5 * dp.length
-            part.da = pi
-            a0 = atan2(dp.y, dp.x) - pi / 2 - a0
-        else:
-            part.length = dp.length
-            a0 = atan2(dp.y, dp.x) - a0
-
-        if a0 > pi:
-            a0 -= 2 * pi
-        if a0 < -pi:
-            a0 += 2 * pi
-        part.a0 = a0
-
-        if idx + 1 < d.n_parts:
-            # adjust rotation of next part
-            part1 = d.parts[idx + 1]
-            if "C_" in part.type:
-                a0 = part1.a0 - pi / 2
-            else:
-                a0 = part1.a0 + w.straight(1).angle - atan2(dp.y, dp.x)
-
-            if a0 > pi:
-                a0 -= 2 * pi
-            if a0 < -pi:
-                a0 += 2 * pi
-            part1.a0 = a0
-
-        d.auto_update = True
-
-
-class ArchipackSegment():
-    """
-        A single manipulable polyline like segment
-        polyline like segment line or arc based
-        @TODO: share this base class with
-        stair, wall, fence, slab
-    """
-    type = EnumProperty(
-            items=(
-                ('S_SEG', 'Straight', '', 0),
-                ('C_SEG', 'Curved', '', 1),
-                ),
-            default='S_SEG',
-            update=update_type
-            )
-    length = FloatProperty(
-            name="Length",
-            min=0.001,
-            default=2.0,
-            update=update
-            )
-    radius = FloatProperty(
-            name="Radius",
-            min=0.5,
-            default=0.7,
-            update=update
-            )
-    da = FloatProperty(
-            name="Angle",
-            min=-pi,
-            max=pi,
-            default=pi / 2,
-            subtype='ANGLE', unit='ROTATION',
-            update=update
-            )
-    a0 = FloatProperty(
-            name="Start angle",
-            min=-2 * pi,
-            max=2 * pi,
-            default=0,
-            subtype='ANGLE', unit='ROTATION',
-            update=update
-            )
-    offset = FloatProperty(
-            name="Offset",
-            description="Add to current segment offset",
-            default=0,
-            unit='LENGTH', subtype='DISTANCE',
-            update=update
-            )
-    linked_idx = IntProperty(default=-1)
-
-    # @TODO:
-    # flag to handle wall's  x_offset
-    # when set add wall offset value to segment offset
-    # pay attention at allowing per wall segment offset
-
-    manipulators = CollectionProperty(type=archipack_manipulator)
-
-    def find_in_selection(self, context):
-        raise NotImplementedError
-
-    def update(self, context, manipulable_refresh=False):
-        props = self.find_in_selection(context)
-        if props is not None:
-            props.update(context, manipulable_refresh)
-
-    def draw_insert(self, context, layout, index):
-        """
-            May implement draw for insert / remove segment operators
-        """
-        pass
-
-    def draw(self, context, layout, index):
-        box = layout.box()
-        box.prop(self, "type", text=str(index + 1))
-        self.draw_insert(context, box, index)
-        if self.type in ['C_SEG']:
-            box.prop(self, "radius")
-            box.prop(self, "da")
-        else:
-            box.prop(self, "length")
-        box.prop(self, "a0")
-        
 
 class archipack_slab_part(ArchipackSegment, PropertyGroup):
-    # DimensionProvider related
-    uid = IntProperty(default=0)
+    manipulators = CollectionProperty(type=archipack_manipulator)
+
+    linked_idx = IntProperty(default=-1)
+
+    def get_datablock(self, o):
+        return archipack_slab.datablock(o)
 
     def draw_insert(self, context, layout, index):
         row = layout.row(align=True)
-        row.operator("archipack.slab_insert", text="Split").index = index
+        row.operator("archipack.segment_insert", text="Split").index = index
         row.operator("archipack.slab_balcony", text="Balcony").index = index
         if index > 0:
-            row.operator("archipack.slab_remove", text="Remove").index = index
-
-    def find_in_selection(self, context):
-        """
-            find witch selected object this instance belongs to
-            provide support for "copy to selected"
-        """
-        selected = [o for o in context.selected_objects]
-        for o in selected:
-            props = archipack_slab.datablock(o)
-            if props:
-                for part in props.parts:
-                    if part == self:
-                        return props
-        return None
+            row.operator("archipack.segment_remove", text="Remove").index = index
 
 
-class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, DimensionProvider, PropertyGroup):
+class archipack_slab(ArchipackObject, ArchipackUserDefinedPath, Manipulable, DimensionProvider, PropertyGroup):
     # boundary
-    n_parts = IntProperty(
-            name="Parts",
-            min=1,
-            default=1, 
-            update=update_manipulators
-            )
     parts = CollectionProperty(type=archipack_slab_part)
     closed = BoolProperty(
             default=True,
             name="Close",
-            options={'SKIP_SAVE'},
-            update=update_manipulators
+            options={'SKIP_SAVE'}
             )
-    # UI layout related
-    parts_expand = BoolProperty(
-            options={'SKIP_SAVE'},
-            default=False
+    always_closed = BoolProperty(
+            default=True,
+            name="Always closed geometry",
+            description="Flag indicate whenever geometry path is always closed",
+            options={'SKIP_SAVE'}
             )
 
+    # UI layout related
     x_offset = FloatProperty(
             name="Offset",
             default=0.0, precision=2, step=1,
@@ -572,14 +281,10 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
             unit='LENGTH', subtype='DISTANCE',
             update=update
             )
-    auto_synch = BoolProperty(
-            name="Auto-Synch",
-            description="Keep wall in synch when editing",
-            default=True,
-            update=update_manipulators
-            )
 
-    childs = CollectionProperty(type=archipack_slab_child)
+    # store childs with parts points locations to relocate
+    reloc_childs = CollectionProperty(type=archipack_slab_relocate_child)
+
     # Flag to prevent mesh update while making bulk changes over variables
     auto_update = BoolProperty(
             options={'SKIP_SAVE'},
@@ -587,15 +292,13 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
             update=update_manipulators
             )
 
-    def get_generator(self):
-        g = SlabGenerator(self)
+    def get_generator(self, o=None):
+        g = SlabGenerator(self, o)
         for part in self.parts:
             # type, radius, da, length
             g.add_part(part)
-
         g.set_offset(self.x_offset)
         g.close(self.x_offset)
-        g.locate_manipulators()
         # here segs are without offset
         # seg.line contains offset
         return g
@@ -612,26 +315,12 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
         self.parts.move(idx, where + 1)
         return p
 
-    def insert_part(self, context, where):
-        self.manipulable_disable(context)
-        self.auto_update = False
-        # the part we do split
-        part_0 = self.parts[where]
-        part_0.length /= 2
-        part_0.da /= 2
-        self.new_part(
-            where,
-            part_0.type,
-            part_0.length,
-            part_0.radius,
-            part_0.offset,
-            0,
-            part_0.da)
-        for c in self.childs:
-            if c.idx > where:
-                c.idx += 1
-        self.setup_manipulators()
-        self.auto_update = True
+    def after_insert_part(self, context, o, where, distance):
+        for c in self.reloc_childs:
+            if c.wall_id0 > where:
+                c.wall_id0 += 1
+            if c.wall_id1 > where:
+                c.wall_id1 += 1
 
     def insert_balcony(self, context, where):
 
@@ -664,313 +353,324 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
 
         self.setup_manipulators()
 
-        for c in self.childs:
-            if c.idx > where:
-                c.idx += 4
+        for c in self.reloc_childs:
+            if c.wall_id0 > where:
+                c.wall_id0 += 4
+            if c.wall_id1 > where:
+                c.wall_id1 += 4
 
         self.auto_update = True
-        g = self.get_generator()
 
+        g = self.get_generator()
         o = context.active_object
         bpy.ops.archipack.fence(auto_manipulate=False)
         c = context.active_object
-        c.select = True
-        c.data.archipack_fence[0].n_parts = 3
-        c.select = False
+        c.location.z = o.matrix_world.translation.z
+
+        self.select_object(context, c)
+
+        d = c.data.archipack_fence[0]
+        d.n_parts = 3
+        self.unselect_object(c)
         # link to o
         c.location = Vector((0, 0, 0))
         c.parent = o
         c.location = g.segs[where + 1].p0.to_3d()
-        self.add_child(c.name, where + 1)
-        # c.matrix_world.translation = g.segs[where].p1.to_3d()
-        o.select = True
-        context.scene.objects.active = o
-        self.relocate_childs(context, o, g)
+        maxdist = 1e32
+        coordsys = CoordSys([o])
+        tree = Q_tree(coordsys)
+        segs = [seg.line for seg in g.segs]
 
-    def add_part(self, context, length):
-        self.manipulable_disable(context)
-        self.auto_update = False
-        p = self.parts.add()
-        p.length = length
-        self.n_parts += 1
-        self.setup_manipulators()
-        self.auto_update = True
-        return p
+        # collect own walls segs
+        # Init Tree for openings
+        for i, seg in enumerate(segs):
+            tree.insert(seg)
 
-    def add_child(self, name, idx):
-        c = self.childs.add()
-        c.child_name = name
-        c.idx = idx
+        self.add_relocate_child(tree, c.name, 0, segs[where + 1].p0, segs, maxdist)
+        self.add_relocate_child(tree, c.name, 1, segs[where + 2].p0, segs, maxdist)
+        self.add_relocate_child(tree, c.name, 2, segs[where + 3].p0, segs, maxdist)
+        self.add_relocate_child(tree, c.name, 3, segs[where + 4].p0, segs, maxdist)
+        # c.matrix_world.translation = g.segs[where + 1].p1.to_3d()
+        self.select_object(context, o, True)
+        self.relocate_childs(context, o)
 
-    def setup_childs(self, o, g):
+    def _find_relocate_childs(self, o, childs):
+        d = archipack_slab_relocate_child.filter_child(self, o)
+        if d:
+            childs[o.name] = (o, d)
+
+    def find_relocate_childs(self, o):
+        # find childs and sort by kind
+        childs = {}
+        for c in o.children:
+            self._find_relocate_childs(c, childs)
+        return childs
+
+    def add_generator(self, name, c, d, generators, tM=None, force=False):
+        if name != "" and c and (name not in generators or force):
+            if tM is None:
+                tM = c.matrix_world
+
+            g = d.get_generator(tM)
+
+            generators[name] = [
+                c,
+                d,
+                g,
+                tM.inverted(),
+                False
+                ]
+
+    def setup_childs(self, context, o):
         """
             Store childs
+            create manipulators
             call after a boolean oop
+
+            Unlike other routines,
+            generators use world coordsys
         """
-        # print("setup_childs")
-        self.childs.clear()
-        itM = o.matrix_world.inverted()
 
-        dmax = 0.2
-        for c in o.children:
-            if (c.data and 'archipack_fence' in c.data):
-                pt = (itM * c.matrix_world.translation).to_2d()
-                for idx, seg in enumerate(g.segs):
-                    # may be optimized with a bound check
-                    res, d, t = seg.point_sur_segment(pt)
-                    #  p1
-                    #  |-- x
-                    #  p0
-                    dist = abs(t) * seg.length
-                    if dist < dmax and abs(d) < dmax:
-                        # print("%s %s %s %s" % (idx, dist, d, c.name))
-                        self.add_child(c.name, idx)
+        # logger.debug("Setup_childs %s", o.name)
 
-        # synch wall
-        # store index of segments with p0 match
-        if self.auto_synch:
+        tim = time.time()
+        self.reloc_childs.clear()
 
-            if o.parent is not None:
+        if o.parent is None:
+            return 0
 
-                for i, part in enumerate(self.parts):
-                    part.linked_idx = -1
+        childs = self.find_relocate_childs(o)
 
-                # find first child wall
-                d = None
-                for c in o.parent.children:
-                    if c.data and "archipack_wall2" in c.data:
-                        d = c.data.archipack_wall2[0]
-                        break
+        # retrieve objects to init quadtree
+        objs = [o]
+        for name, child in childs.items():
+            c, cd = child
+            objs.append(c)
 
-                if d is not None:
-                    og = d.get_generator()
-                    j = 0
-                    for i, part in enumerate(self.parts):
-                        ji = j
-                        while ji < d.n_parts + 1:
-                            if (g.segs[i].p0 - og.segs[ji].p0).length < 0.005:
-                                j = ji + 1
-                                part.linked_idx = ji
-                                # print("link: %s to %s" % (i, ji))
-                                break
-                            ji += 1
+        # init a quadtree to minimize intersections tests on setup
+        coordsys = CoordSys(objs)
+        tree = Q_tree(coordsys)
 
-    def relocate_childs(self, context, o, g):
+        g = self.get_generator(o)
+
+        segs = [seg.line for seg in g.segs]
+
+        # Init Tree for openings
+        for i, seg in enumerate(segs):
+            tree.insert(seg)
+
+        # curved segments are not supported
+        for p in self.parts:
+            if p.type == "C_SEG":
+                return
+
+        maxdist = 1.0
+        if len(childs) > 0:
+            # Explicit rule for slab, using wall segs only with larger dist
+            # might use same rule for roof boundary cutters
+            for name, child in childs.items():
+                c, cd = child
+                cd.setup_manipulators()
+                cg = cd.get_generator(c)
+                for c_idx, seg in enumerate(cg.segs):
+                    # point in world coordsys
+                    p = seg.p0
+                    self.add_relocate_child(
+                            tree,
+                            c.name,
+                            c_idx,
+                            p,
+                            segs,
+                            maxdist)
+
+        logger.debug("Setup childs end %s %.4f seconds\n", o.name, (time.time() - tim))
+
+    def add_relocate_child(
+            self,
+            tree,
+            name,
+            c_idx,
+            pt,
+            all_segs,
+            maxdist):
         """
-            Move and resize childs after edition
+         Find 2 closest segments
+         Store distance to segments, segment indexes
+         maxdist: distance of point from segment in front / back
+         seg_idx: index of parent segment to project on closest
+                  allow inner walls projection over outside
+         allow_single: walls inside volume might have only isolated segment
+                  this option enable link to isolated seg using a t and distance rule
         """
-        # print("relocate_childs")
+        closest = []
 
-        # Wall child syncro
-        # must store - idx of shared segs
-        # -> store this in parts provide 1:1 map
-        # share type: full, start only, end only
-        # -> may compute on the fly with idx stored
-        # when full segment does match
-        #  -update type, radius, length, a0, and da
-        # when start only does match
-        #  -update type, radius, a0
-        # when end only does match
-        #  -compute length/radius
-        # @TODO:
-        # handle p0 and p1 changes right in Generator (archipack_2d)
-        # and retrieve params from there
-        if self.auto_synch:
-            if o.parent is not None:
-                wall = None
+        count, selection = tree.intersects(pt, maxdist)
 
-                for child in o.parent.children:
-                    if child.data and "archipack_wall2" in child.data:
-                        wall = child
-                        break
+        # logger.debug("tree.intersects(%s) :%.4f seconds",  count, (time.time() - tim))
 
-                if wall is not None:
-                    d = wall.data.archipack_wall2[0]
-                    d.auto_update = False
-                    w = d.get_generator()
+        for parent_idx in selection:
+            seg = tree._geoms[parent_idx]
+            res, dist, t = seg.point_sur_segment(pt)
+            abs_d = abs(dist)
+            t_max = maxdist / seg.length
 
-                    last_idx = -1
+            # squared dist taking account of point location over segment
+            d2 = dist ** 2
+            if t > 1:
+                d2 += ((t - 1) * seg.length) ** 2
+            elif t < 0:
+                d2 += (t * seg.length) ** 2
 
-                    # update og from g
-                    for i, part in enumerate(self.parts):
-                        idx = part.linked_idx
-                        seg = g.segs[i]
+            if abs_d < maxdist and -t_max < t < 1 + t_max:
+                # logger.debug("%s %s %s %s", name, parent_name, d2, dist ** 2)
+                closest.append((d2, -dist, parent_idx, t))
 
-                        if i + 1 < self.n_parts:
-                            next_idx = self.parts[i + 1].linked_idx
-                        elif d.closed:
-                            next_idx = self.parts[0].linked_idx
-                        else:
-                            next_idx = -1
+        # get 2 closest segments
+        # childs walls use projection of themself through seg_idx
 
-                        if idx > -1:
+        if len(closest) > 1:
+            closest.sort(key=lambda s: s[0])
+            c = self.reloc_childs.add()
+            c.child_name = name
+            c.child_idx = c_idx
+            d, d1, i1, t1 = closest[0][0:4]
+            # try to exclude colinear segments
+            i = 1
+            s0 = all_segs[i1]
+            d2, i2 = closest[1][1:3]
+            n_closest = len(closest) - 1
+            a = abs(all_segs[i2].delta_angle(s0))
+            while i < n_closest and (a > 3.1405 or a < 0.001):
+                if closest[i][0] < d:
+                    d, d1, i1, t1 = closest[i][0:4]
+                    s0 = all_segs[i1]
+                i += 1
+                d2, i2 = closest[i][1:3]
+                a = abs(all_segs[i2].delta_angle(s0))
 
-                            # start and shared: update rotation
-                            a = seg.angle - w.segs[idx].angle
+            c.d0, c.seg0, c.t = d1, i1, t1
+            c.d1, c.seg1 = d2, i2
 
-                            if abs(a) > 0.00001:
-                                w.rotate(idx, a)
+    def post_relocate(self, context):
+        o = self.find_in_selection(context)
+        if o is not None:
+            logger.debug("post_relocate %s", o.name)
+            self.relocate_childs(context, o)
 
-                            if last_idx > -1:
-                                w.segs[last_idx].p1 = seg.p0
+    def relocate_childs(self, context, o):
+        """
+            Move and resize childs after wall edition
+            childs here are either doors or windows
+            Unlike other routines,
+            generators use world coordsys
+            T childs walls only update doors and windows
+        """
+        tim = time.time()
 
-                            if next_idx > -1:
-
-                                if (idx + 1 == next_idx) or (next_idx == 0 and i + 1 == self.n_parts):
-                                    # shared: should move last point
-                                    # and apply to next segments
-                                    # this is overriden for common segs
-                                    # but translate non common ones
-                                    dp = seg.p1 - w.segs[idx].p1
-                                    w.translate(idx, dp)
-
-                                    # shared: transfert type too
-                                    if "C_" in part.type:
-                                        d.parts[idx].type = 'C_WALL'
-                                        w.segs[idx] = CurvedSlab(seg.c, seg.r, seg.a0, seg.da)
-                                    else:
-                                        d.parts[idx].type = 'S_WALL'
-                                        w.segs[idx] = StraightSlab(seg.p.copy(), seg.v.copy())
-                            last_idx = -1
-
-                        elif next_idx > -1:
-                            # only last is shared
-                            # note: on next run will be part of start
-                            last_idx = next_idx - 1
-
-                    # update d from og
-                    last_seg = None
-                    for i, seg in enumerate(w.segs):
-
-                        d.parts[i].a0 = seg.delta_angle(last_seg)
-
-                        last_seg = seg
-
-                        if "C_" in d.parts[i].type:
-                            d.parts[i].radius = seg.r
-                            d.parts[i].da = seg.da
-                        else:
-                            d.parts[i].length = max(0.01, seg.length)
-
-                    wall.select = True
-                    context.scene.objects.active = wall
-
-                    d.auto_update = True
-                    wall.select = False
-
-                    o.select = True
-                    context.scene.objects.active = o
-                    wall.matrix_world = Matrix([
-                        [1, 0, 0, 0],
-                        [0, 1, 0, 0],
-                        [0, 0, 1, d.z_offset],
-                        [0, 0, 0, 1],
-                        ]) * o.matrix_world
+        logger.debug("Relocate_childs %s", o.name)
+        g = self.get_generator(o)
 
         tM = o.matrix_world
-        for child in self.childs:
-            c, d = child.get_child(context)
-            if c is None:
-                continue
+        loc, rot, scale = tM.decompose()
 
-            a = g.segs[child.idx].angle
-            x, y = g.segs[child.idx].p0
-            sa = sin(a)
-            ca = cos(a)
+        # Generators: object, datablock, generator, mat world inverse, dirty flag
+        generators = {}
 
-            if d is not None:
-                c.select = True
+        # build a dict for each child
+        soft = {}
 
-                # auto_update need object to be active to
-                # setup manipulators on the right object
-                context.scene.objects.active = c
+        # process childs in the right order
+        child_names = []
+        for child in self.reloc_childs:
+            child_name = child.child_name
+            if child_name not in soft:
+                c, d = child.get_child(context)
+                if c is None:
+                    continue
+                child_names.append(child_name)
+                soft[child_name] = []
+                self.add_generator(child_name, c, d, generators)
 
-                d.auto_update = False
-                for i, part in enumerate(d.parts):
-                    if "C_" in self.parts[i + child.idx].type:
-                        part.type = "C_FENCE"
+            soft[child_name].append(child)
+
+        logger.debug("Relocate_childs generators() :%.4f seconds", time.time() - tim)
+
+        n_changes = 0
+
+        for name in child_names:
+            child = soft[name]
+            # logger.debug("Relocate_childs start :%.2f seconds", time.time() - tim)
+            # logger.debug("Relocate_childs %s child:%s", o.name, name)
+            c, d, cg, itM, dirty = generators[name]
+
+            # apply changes to generator
+            n_segs = len(cg.segs)
+            changed = False
+            for cd in child:
+
+                # find closest segments: use offset of main wall for t childs
+                s0 = g.segs[cd.seg0].line.offset(cd.d0)
+                s1 = g.segs[cd.seg1].line.offset(cd.d1)
+                # p in world coordsys
+                res, p, u, v = s0.intersect_ext(s1)
+
+                # if intersection fails p = 0
+                if p != 0:
+                    if cd.child_idx < n_segs:
+                        if (cg.segs[cd.child_idx].p0 - p).length > 0.001:
+                            n_changes += 1
+                            changed = True
+                        cg.segs[cd.child_idx].p0 = p
+                        if cd.child_idx > 0:
+                            cg.segs[cd.child_idx - 1].p1 = p
+                        else:
+                            d.move_object(c, p.to_3d())
+                            # flag generator as dirty
+                            generators[name][4] = True
                     else:
-                        part.type = "S_FENCE"
-                    part.a0 = self.parts[i + child.idx].a0
-                    part.da = self.parts[i + child.idx].da
-                    part.length = self.parts[i + child.idx].length
-                    part.radius = self.parts[i + child.idx].radius
-                d.parts[0].a0 = pi / 2
-                d.auto_update = True
-                c.select = False
+                        if (cg.segs[cd.child_idx - 1].p1 - p).length > 0.001:
+                            n_changes += 1
+                            changed = True
+                        cg.segs[cd.child_idx - 1].p1 = p
 
-                context.scene.objects.active = o
-                # preTranslate
-                c.matrix_world = tM * Matrix([
-                    [sa, ca, 0, x],
-                    [-ca, sa, 0, y],
-                    [0, 0, 1, 0],
-                    [0, 0, 0, 1]
-                ])
+            if changed:
+                # update data from generator
+                last = None
+                for i, seg in enumerate(cg.segs):
 
-    def remove_part(self, context, where):
-        self.manipulable_disable(context)
-        self.auto_update = False
+                    p = d.parts[i]
+                    if last is None:
+                        # first a0 is absolute
+                        p.a0 = cg.a0
+                    else:
+                        # a0 is delta between segs
+                        p.a0 = seg.delta_angle(last)
+                    if "C_" in p.type:
+                        p.da = seg.da
+                        p.radius = seg.r
+                    else:
+                        p.length = seg.length
+                    last = seg
+                # logger.debug("Relocate_childs change :%.2f seconds", time.time() - tim)
+                self.select_object(context, c, True)
+                d.update(context)
+                # logger.debug("Relocate_childs update :%.2f seconds", time.time() - tim)
+                self.unselect_object(c)
 
-        # preserve shape
-        # using generator
-        if where > 0:
+        logger.debug("Relocate_childs(%s of %s) :%.4f seconds", n_changes, len(self.reloc_childs), time.time() - tim)
 
-            g = self.get_generator()
-            w = g.segs[where - 1]
-            w.p1 = g.segs[where].p1
+        self.select_object(context, o, True)
 
-            if where + 1 < self.n_parts:
-                self.parts[where + 1].a0 = g.segs[where + 1].delta_angle(w)
-
-            part = self.parts[where - 1]
-
-            if "C_" in part.type:
-                part.radius = w.r
-            else:
-                part.length = w.length
-
-            if where > 1:
-                part.a0 = w.delta_angle(g.segs[where - 2])
-            else:
-                part.a0 = w.straight(1, 0).angle
-
-        for c in self.childs:
-            if c.idx >= where:
-                c.idx -= 1
-        self.parts.remove(where)
-        self.n_parts -= 1
-        # fix snap manipulators index
-        self.setup_manipulators()
-        self.auto_update = True
-
-    def update_parts(self, o, update_childs=False):
-        # remove rows
-        # NOTE:
-        # n_parts+1
-        # as last one is end point of last segment or closing one
-        row_change = False
-        for i in range(len(self.parts), self.n_parts, -1):
-            row_change = True
-            self.parts.remove(i - 1)
-
-        # add rows
-        for i in range(len(self.parts), self.n_parts):
-            row_change = True
-            self.parts.add()
-
-        for p in self.parts:
-            if p.uid == 0:
-                self.create_uid(p)
-
-        self.setup_manipulators()
-
-        g = self.get_generator()
-
-        if o is not None and (row_change or update_childs):
-            self.setup_childs(o, g)
-
-        return g
+    def after_remove_part(self, context, o, where, distance):
+        """
+         Rebuild childs index and location
+         When removing a part
+        """
+        for c in self.reloc_childs:
+            if c.wall_id0 >= where:
+                c.wall_id0 -= 1
+            if c.wall_id1 >= where:
+                c.wall_id1 -= 1
 
     def setup_manipulators(self):
 
@@ -980,68 +680,29 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
             s.prop1_name = "z"
             s.normal = Vector((0, 1, 0))
 
-        for i in range(self.n_parts):
-            p = self.parts[i]
-            n_manips = len(p.manipulators)
-            if n_manips < 1:
-                s = p.manipulators.add()
-                s.type_key = "ANGLE"
-                s.prop1_name = "a0"
-            p.manipulators[0].type_key = 'ANGLE'
-            if n_manips < 2:
-                s = p.manipulators.add()
-                s.type_key = "SIZE"
-                s.prop1_name = "length"
-            if n_manips < 3:
-                s = p.manipulators.add()
-                s.type_key = 'WALL_SNAP'
-                s.prop1_name = str(i)
-                s.prop2_name = 'z'
-            if n_manips < 4:
-                s = p.manipulators.add()
-                s.type_key = 'DUMB_STRING'
-                s.prop1_name = str(i + 1)
-            p.manipulators[2].prop1_name = str(i)
-            p.manipulators[3].prop1_name = str(i + 1)
+        self.setup_parts_manipulators('z')
 
-        self.parts[-1].manipulators[0].type_key = 'DUMB_ANGLE'
+    def from_spline(self, context, wM, resolution, spline):
+        o = self.find_in_selection(context)
 
-    def from_spline(self, wM, resolution, spline):
-    
-        pts = self.coords_from_spline(spline, wM, resolution, ccw=True)
-        tM = Matrix.Translation(pts[0].copy())
-        self.from_points(pts, spline.use_cyclic_u)
-        return tM
-        
-    def from_points(self, pts, closed):
+        if o is None:
+            return
 
+        pts = self.coords_from_spline(
+            spline,
+            wM,
+            resolution,
+            ccw=True)
+
+        if len(pts) < 3:
+            return
+
+        o.matrix_world = Matrix.Translation(pts[0].copy())
+        auto_update = self.auto_update
         self.auto_update = False
+        self.from_points(pts)
+        self.auto_update = auto_update
 
-        self.n_parts = len(pts) - 1
-
-        self.update_parts(None)
-        
-        p0 = pts.pop(0)
-        a0 = 0
-        for i, p1 in enumerate(pts):
-            dp = p1 - p0
-            da = atan2(dp.y, dp.x) - a0
-            if da > pi:
-                da -= 2 * pi
-            if da < -pi:
-                da += 2 * pi
-            if i >= len(self.parts):
-                break
-            p = self.parts[i]
-            p.length = dp.to_2d().length
-            p.dz = dp.z
-            p.a0 = da
-            a0 += da
-            p0 = p1
-
-        self.closed = closed
-        self.auto_update = True
-        
     def make_surface(self, o, verts):
         bm = bmesh.new()
         for v in verts:
@@ -1080,13 +741,17 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
         if manipulable_refresh:
             self.manipulable_disable(context)
 
-        g = self.update_parts(o, update_childs)
+        changed = self.update_parts()
+        g = self.get_generator()
+        g.locate_manipulators()
+
+        if changed or update_childs:
+            self.setup_childs(context, o)
 
         # relocate before cutting segs
-        self.relocate_childs(context, o, g)
+        self.relocate_childs(context, o)
 
-        o.select = True
-        context.scene.objects.active = o
+        self.select_object(context, o, True)
 
         # cut transfer .line with offset into g.segs
         g.cut(context, o)
@@ -1099,16 +764,16 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
             modif.use_even_offset = True
             modif.material_offset_rim = 2
             modif.material_offset = 1
+            modif.offset = 1.0
 
         modif.thickness = self.z
-        modif.offset = 1.0
         o.data.use_auto_smooth = True
         bpy.ops.object.shade_smooth()
 
         # Height
         self.manipulators[0].set_pts([
-            (0, 0, 0),
-            (0, 0, -self.z),
+            self.origin,
+            self.origin + Vector((0, 0, -self.z)),
             (-1, 0, 0)
             ], normal=g.segs[0].straight(-1, 0).v.to_3d())
 
@@ -1163,9 +828,11 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
             return False
 
         o = context.active_object
-        g = self.get_generator()
+        #
         # setup childs manipulators
-        self.setup_childs(o, g)
+        self.setup_childs(context, o)
+        # generator does update manipulators location
+        self.get_generator()
         self.manipulable_setup(context)
         self.manipulate_mode = True
 
@@ -1175,46 +842,15 @@ class archipack_slab(ArchipackObject, ArchipackCurveManager, Manipulable, Dimens
 
 
 def update_hole(self, context):
-    # update parent's roof only when manipulated
+    # update parent only when manipulated
     self.update(context, update_parent=True)
-
-
-def update_operation(self, context):
-    self.reverse(context, make_ccw=(self.operation == 'INTERSECTION'))
 
 
 class archipack_slab_cutter_segment(ArchipackCutterPart, PropertyGroup):
     manipulators = CollectionProperty(type=archipack_manipulator)
-    type = EnumProperty(
-        name="Type",
-        items=(
-            ('DEFAULT', 'Side', 'Side with rake', 0),
-            ('BOTTOM', 'Bottom', 'Bottom with gutter', 1),
-            ('LINK', 'Side link', 'Side witout decoration', 2),
-            ('AXIS', 'Top', 'Top part with hip and beam', 3)
-            # ('LINK_VALLEY', 'Side valley', 'Side with valley', 3),
-            # ('LINK_HIP', 'Side hip', 'Side with hip', 4)
-            ),
-        default='DEFAULT',
-        update=update_hole
-        )
 
-    def find_in_selection(self, context):
-        selected = [o for o in context.selected_objects]
-        for o in selected:
-            d = archipack_slab_cutter.datablock(o)
-            if d:
-                for part in d.parts:
-                    if part == self:
-                        return d
-        return None
-
-    def draw(self, layout, context, index):
-        box = layout.box()
-        box.label(text="Part:" + str(index + 1))
-        # box.prop(self, "type", text=str(index + 1))
-        box.prop(self, "length")
-        box.prop(self, "a0")
+    def get_datablock(self, o):
+        return archipack_slab_cutter.datablock(o)
 
 
 class archipack_slab_cutter(ArchipackCutter, ArchipackObject, Manipulable, DimensionProvider, PropertyGroup):
@@ -1231,11 +867,10 @@ class archipack_slab_cutter(ArchipackCutter, ArchipackObject, Manipulable, Dimen
         if o is not None:
             d = archipack_slab.datablock(o.parent)
             if d is not None:
-                o.parent.select = True
-                context.scene.objects.active = o.parent
+                self.select_object(context, o.parent, True)
                 d.update(context)
-                o.parent.select = False
-            context.scene.objects.active = o
+                self.unselect_object(o.parent)
+            self.select_object(context, o, True)
 
 
 class ARCHIPACK_PT_slab(Panel):
@@ -1249,12 +884,12 @@ class ARCHIPACK_PT_slab(Panel):
 
     @classmethod
     def poll(cls, context):
-        return archipack_slab.filter(context.active_object)
+        return archipack_slab.poll(context.active_object)
 
     def draw(self, context):
         o = context.active_object
-        prop = archipack_slab.datablock(o)
-        if prop is None:
+        d = archipack_slab.datablock(o)
+        if d is None:
             return
         layout = self.layout
         row = layout.row(align=True)
@@ -1263,20 +898,13 @@ class ARCHIPACK_PT_slab(Panel):
         box = layout.box()
         box.operator('archipack.slab_cutter').parent = o.name
         box = layout.box()
-        box.prop(prop, 'z')
-        box.prop(prop, 'x_offset')
+        d.template_user_path(context, box)
         box = layout.box()
-        box.prop(prop, 'auto_synch')
-        box = layout.box()
-        row = box.row()
-        if prop.parts_expand:
-            row.prop(prop, 'parts_expand', icon="TRIA_DOWN", icon_only=True, text="Parts", emboss=False)
-            box.prop(prop, 'n_parts')
-            # box.prop(prop, 'closed')
-            for i, part in enumerate(prop.parts):
-                part.draw(context, layout, i)
-        else:
-            row.prop(prop, 'parts_expand', icon="TRIA_RIGHT", icon_only=True, text="Parts", emboss=False)
+        box.prop(d, 'z')
+        box.prop(d, 'x_offset')
+        # box = layout.box()
+        # box.prop(d, 'auto_synch')
+        d.template_parts(context, layout, draw_type=True)
 
 
 class ARCHIPACK_PT_slab_cutter(Panel):
@@ -1288,43 +916,19 @@ class ARCHIPACK_PT_slab_cutter(Panel):
 
     @classmethod
     def poll(cls, context):
-        return archipack_slab_cutter.filter(context.active_object)
+        return archipack_slab_cutter.poll(context.active_object)
 
     def draw(self, context):
-        prop = archipack_slab_cutter.datablock(context.active_object)
-        if prop is None:
+        d = archipack_slab_cutter.datablock(context.active_object)
+        if d is None:
             return
         layout = self.layout
-        scene = context.scene
-        box = layout.box()
-        box.operator('archipack.manipulate', icon='HAND')
-        box.prop(prop, 'operation', text="")
-        prop.draw(layout, context)
+        d.draw(context, layout)
 
 
 # ------------------------------------------------------------------
 # Define operator class to create object
 # ------------------------------------------------------------------
-
-
-class ARCHIPACK_OT_slab_insert(Operator):
-    bl_idname = "archipack.slab_insert"
-    bl_label = "Insert"
-    bl_description = "Insert part"
-    bl_category = 'Archipack'
-    bl_options = {'REGISTER', 'UNDO'}
-    index = IntProperty(default=0)
-
-    def execute(self, context):
-        if context.mode == "OBJECT":
-            d = archipack_slab.datablock(context.active_object)
-            if d is None:
-                return {'CANCELLED'}
-            d.insert_part(context, self.index)
-            return {'FINISHED'}
-        else:
-            self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
-            return {'CANCELLED'}
 
 
 class ARCHIPACK_OT_slab_balcony(Operator):
@@ -1341,26 +945,6 @@ class ARCHIPACK_OT_slab_balcony(Operator):
             if d is None:
                 return {'CANCELLED'}
             d.insert_balcony(context, self.index)
-            return {'FINISHED'}
-        else:
-            self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
-            return {'CANCELLED'}
-
-
-class ARCHIPACK_OT_slab_remove(Operator):
-    bl_idname = "archipack.slab_remove"
-    bl_label = "Remove"
-    bl_description = "Remove part"
-    bl_category = 'Archipack'
-    bl_options = {'REGISTER', 'UNDO'}
-    index = IntProperty(default=0)
-
-    def execute(self, context):
-        if context.mode == "OBJECT":
-            d = archipack_slab.datablock(context.active_object)
-            if d is None:
-                return {'CANCELLED'}
-            d.remove_part(context, self.index)
             return {'FINISHED'}
         else:
             self.report({'WARNING'}, "Archipack: Option only valid in Object mode")
@@ -1392,9 +976,12 @@ class ARCHIPACK_OT_slab(ArchipackCreateTool, Operator):
         d = m.archipack_slab.add()
         # make manipulators selectable
         d.manipulable_selectable = True
-        context.scene.objects.link(o)
-        o.select = True
-        context.scene.objects.active = o
+        # Link object into scene
+        self.link_object_to_scene(context, o)
+
+        # select and make active
+        self.select_object(context, o, True)
+
         self.load_preset(d)
         self.add_material(o)
         return o
@@ -1414,8 +1001,8 @@ class ARCHIPACK_OT_slab(ArchipackCreateTool, Operator):
                 bpy.ops.object.select_all(action="DESELECT")
                 o = self.create(context)
                 o.location = bpy.context.scene.cursor_location
-                o.select = True
-                context.scene.objects.active = o
+                # select and make active
+                self.select_object(context, o, True)
                 self.manipulate()
             else:
                 self.delete(context)
@@ -1450,10 +1037,10 @@ class ARCHIPACK_OT_slab_from_curve(Operator):
     def create(self, context):
         curve = context.active_object
         bpy.ops.archipack.slab(auto_manipulate=self.auto_manipulate)
-        o = context.scene.objects.active
+        o = context.active_object
         d = archipack_slab.datablock(o)
         spline = curve.data.splines[0]
-        o.matrix_world = d.from_spline(curve.matrix_world, 12, spline)
+        d.from_spline(context, curve.matrix_world, 12, spline)
 
         return o
 
@@ -1470,7 +1057,7 @@ class ARCHIPACK_OT_slab_from_curve(Operator):
             return {'CANCELLED'}
 
 
-class ARCHIPACK_OT_slab_from_wall(Operator):
+class ARCHIPACK_OT_slab_from_wall(ArchipackObjectsManager, Operator):
     bl_idname = "archipack.slab_from_wall"
     bl_label = "->Slab"
     bl_description = "Create a slab from a wall"
@@ -1489,61 +1076,55 @@ class ARCHIPACK_OT_slab_from_wall(Operator):
         wall = context.active_object
         wd = wall.data.archipack_wall2[0]
         bpy.ops.archipack.slab(auto_manipulate=False)
-        o = context.scene.objects.active
+        o = context.active_object
         d = archipack_slab.datablock(o)
         d.auto_update = False
-        d.closed = True
+        # use wall generator
+        # so slab match wall's outside
+        g = wd.get_generator()
+        pts = [s.p0 for s in g.segs]
+        if wd.is_cw(pts):
+            offset = wd.left_offset
+        else:
+            offset = wd.left_offset + wd.width
+        g.set_offset(offset)
+        g.close(offset)
         d.parts.clear()
         d.n_parts = wd.n_parts + 1
-        for part in wd.parts:
+        a0 = g.a0
+        last = None
+        for i, part in enumerate(wd.parts):
+            seg = g.segs[i].line
             p = d.parts.add()
+            p.type = part.type
+            if last is not None:
+                a0 = seg.delta_angle(last)
+            last = seg
+            p.a0 = a0
             if "S_" in part.type:
-                p.type = "S_SEG"
+                p.length = seg.length
             else:
-                p.type = "C_SEG"
-            p.length = part.length
-            p.radius = part.radius
-            p.da = part.da
-            p.a0 = part.a0
-
-        side = 1
-        if wd.flip:
-            side = -1
-        d.x_offset = side * 0.5 * (1 + wd.x_offset) * wd.width
+                p.radius = seg.r
+                p.da = seg.da
 
         d.auto_update = True
+        x, y = g.segs[0].line.p0
         # pretranslate
         if self.ceiling:
-            o.matrix_world = Matrix([
-                [1, 0, 0, 0],
-                [0, 1, 0, 0],
-                [0, 0, 1, wd.z - wd.z_offset + d.z],
-                [0, 0, 0, 1],
-                ]) * wall.matrix_world
+            o.matrix_world = Matrix.Translation(
+                Vector((x, y, wd.z - wd.z_offset + d.z))
+                ) * wall.matrix_world
         else:
-            o.matrix_world = Matrix([
-                [1, 0, 0, 0],
-                [0, 1, 0, 0],
-                [0, 0, 1, -wd.z_offset],
-                [0, 0, 0, 1],
-                ]) * wall.matrix_world
+            o.matrix_world = Matrix.Translation(
+                Vector((x, y, -wd.z_offset))
+                ) * wall.matrix_world
             bpy.ops.object.select_all(action='DESELECT')
             # parenting childs to wall reference point
-            if wall.parent is None:
-                x, y, z = wall.bound_box[0]
-                context.scene.cursor_location = wall.matrix_world * Vector((x, y, z))
-                # fix issue #9
-                context.scene.objects.active = wall
-                if bpy.ops.archipack.reference_point.poll():
-                    bpy.ops.archipack.reference_point()
-            else:
-                wall.parent.select = True
-                context.scene.objects.active = wall.parent
-            wall.select = True
-            o.select = True
-            bpy.ops.archipack.parent_to_reference()
-            wall.select = False
-            wall.parent.select = False
+            self.select_object(context, o)
+            self.select_object(context, wall, True)
+            bpy.ops.archipack.add_reference_point()
+            self.unselect_object(wall)
+            self.unselect_object(wall.parent)
         return o
 
     # -----------------------------------------------------
@@ -1553,8 +1134,7 @@ class ARCHIPACK_OT_slab_from_wall(Operator):
         if context.mode == "OBJECT":
             bpy.ops.object.select_all(action="DESELECT")
             o = self.create(context)
-            o.select = True
-            context.scene.objects.active = o
+            self.select_object(context, o, True)
             if self.auto_manipulate:
                 bpy.ops.archipack.manipulate('INVOKE_DEFAULT')
             return {'FINISHED'}
@@ -1571,12 +1151,15 @@ class ARCHIPACK_OT_slab_cutter(ArchipackCreateTool, Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     parent = StringProperty("")
+    curve = StringProperty("")
 
     def create(self, context):
         m = bpy.data.meshes.new("Slab Cutter")
         o = bpy.data.objects.new("Slab Cutter", m)
         d = m.archipack_slab_cutter.add()
         parent = context.scene.objects.get(self.parent)
+        curve = context.scene.objects.get(self.curve)
+
         if parent is not None:
             o.parent = parent
             bbox = parent.bound_box
@@ -1585,13 +1168,8 @@ class ARCHIPACK_OT_slab_cutter(ArchipackCreateTool, Operator):
             x1, y1, z = bbox[6]
             x = 0.2 * (x1 - x0)
             y = 0.2 * (y1 - y0)
-            o.matrix_world = parent.matrix_world * Matrix([
-                [1, 0, 0, -3 * x],
-                [0, 1, 0, 0],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1]
-                ])
-            d.auto_update = False
+            o.matrix_world = parent.matrix_world * Matrix.Translation(Vector((-3 * x, 0, 0)))
+            # d.auto_update = False
             p = d.parts.add()
             p.a0 = - angle_90
             p.length = y
@@ -1601,19 +1179,24 @@ class ARCHIPACK_OT_slab_cutter(ArchipackCreateTool, Operator):
             p = d.parts.add()
             p.a0 = angle_90
             p.length = y
-            d.n_parts = 3
-            d.close = True
-            d.auto_update = True
+            p = d.parts.add()
+            p.a0 = angle_90
+            p.length = x
+            d.n_parts = 4
+            # d.auto_update = True
 
         else:
             o.location = context.scene.cursor_location
+
         # make manipulators selectable
         d.manipulable_selectable = True
-        context.scene.objects.link(o)
-        o.select = True
-        context.scene.objects.active = o
+        self.link_object_to_scene(context, o)
+        self.select_object(context, o, True)
         self.load_preset(d)
         update_operation(d, context)
+
+        if curve is not None:
+            d.user_defined_path = curve.name
 
         return o
 
@@ -1624,8 +1207,7 @@ class ARCHIPACK_OT_slab_cutter(ArchipackCreateTool, Operator):
         if context.mode == "OBJECT":
             bpy.ops.object.select_all(action="DESELECT")
             o = self.create(context)
-            o.select = True
-            context.scene.objects.active = o
+            self.select_object(context, o, True)
             self.manipulate()
             return {'FINISHED'}
         else:
@@ -1641,30 +1223,26 @@ def register():
     bpy.utils.register_class(ARCHIPACK_PT_slab_cutter)
 
     bpy.utils.register_class(archipack_slab_material)
-    bpy.utils.register_class(archipack_slab_child)
+    bpy.utils.register_class(archipack_slab_relocate_child)
     bpy.utils.register_class(archipack_slab_part)
     bpy.utils.register_class(archipack_slab)
     Mesh.archipack_slab = CollectionProperty(type=archipack_slab)
     bpy.utils.register_class(ARCHIPACK_PT_slab)
     bpy.utils.register_class(ARCHIPACK_OT_slab)
-    bpy.utils.register_class(ARCHIPACK_OT_slab_insert)
     bpy.utils.register_class(ARCHIPACK_OT_slab_balcony)
-    bpy.utils.register_class(ARCHIPACK_OT_slab_remove)
     bpy.utils.register_class(ARCHIPACK_OT_slab_from_curve)
     bpy.utils.register_class(ARCHIPACK_OT_slab_from_wall)
 
 
 def unregister():
     bpy.utils.unregister_class(archipack_slab_material)
-    bpy.utils.unregister_class(archipack_slab_child)
+    bpy.utils.unregister_class(archipack_slab_relocate_child)
     bpy.utils.unregister_class(archipack_slab_part)
     bpy.utils.unregister_class(archipack_slab)
     del Mesh.archipack_slab
     bpy.utils.unregister_class(ARCHIPACK_PT_slab)
     bpy.utils.unregister_class(ARCHIPACK_OT_slab)
-    bpy.utils.unregister_class(ARCHIPACK_OT_slab_insert)
     bpy.utils.unregister_class(ARCHIPACK_OT_slab_balcony)
-    bpy.utils.unregister_class(ARCHIPACK_OT_slab_remove)
     bpy.utils.unregister_class(ARCHIPACK_OT_slab_from_curve)
     bpy.utils.unregister_class(ARCHIPACK_OT_slab_from_wall)
     del Mesh.archipack_slab_cutter
